@@ -1,0 +1,11 @@
+# Root cause analysis
+
+The summary is a root cause analysis. **Issue** is the symptom. **Hypothesis** is the cause. Do not restate the bug as the hypothesis.
+
+Search the screen, symbol, or text the developer names. Read the file that decides the behavior. Cite the condition. Cross-check the other platform for that same condition. If you cannot name the condition, confidence is low: share hypotheses and the deciding check, and do not write the summary.
+
+Android. Cite the first GoHost frame, not an android.* or androidx.* frame. A Kotlin non-null property fed by a nullable JSON field. A Compose state or visibility flag that stays false. A click or lifecycle call after the view is gone.
+
+iOS. Cite the first consumer-ios frame, not UIKit or the Swift runtime. A force unwrap or an implicitly unwrapped optional on a response field. A decode failure when a key is missing. A UIKit update off the main thread.
+
+**Evidence** lists only paths mobox-glab printed, each with the condition. Confidence is high only when that condition is in the file and matches the symptom. Medium when the file matches and the payload or flag is not in the report. Low means hypotheses in plain sentences, not a conclusion.
