@@ -1,0 +1,63 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "litellm/agora-med",
+  "permissions": [
+    { "action": "generate_image", "resource": "*", "effect": "deny" },
+    { "action": "generate_video", "resource": "*", "effect": "deny" },
+    { "action": "websearch", "resource": "*", "effect": "deny" },
+    { "action": "webfetch", "resource": "*", "effect": "deny" },
+    { "action": "subagent", "resource": "*", "effect": "deny" },
+    { "action": "question", "resource": "*", "effect": "deny" }
+  ],
+  "providers": {
+    "litellm": {
+      "name": "LiteLLM",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://litellm-staging.gopay.sh/v1",
+        "apiKey": "{env:LITELLM_API_KEY}"
+      },
+      "models": {
+        "agora-low": {
+          "name": "agora-low",
+          "modelID": "agora-low",
+          "capabilities": {
+            "tools": true,
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 20480,
+            "output": 2048
+          }
+        },
+        "agora-med": {
+          "name": "agora-med",
+          "modelID": "agora-med",
+          "capabilities": {
+            "tools": true,
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 40960,
+            "output": 8192
+          }
+        },
+        "agora-high": {
+          "name": "agora-high",
+          "modelID": "agora-high",
+          "capabilities": {
+            "tools": true,
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 40960,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}
