@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import base64
@@ -163,7 +164,54 @@ def image_part(raw: bytes):
     return {"type": "file", "mime": mime, "filename": f"qa.{ext}", "url": f"data:{mime};base64,{encoded}"}
 
 
+_MESSAGE_LINK = re.compile(
+    r"https://applink\.(?:larksuite|feishu|larkoffice)\.com/client/message/link/open\?token=[^\s)]+"
+)
+_RECORD_LINK = re.compile(
+    r"https://[A-Za-z0-9.-]+\.(?:larksuite|feishu|larkoffice)\.com/record/([A-Za-z0-9]+)(?:\?[^\s)]*)?"
+)
+_WEB_URL = re.compile(
+    r"https://applink\.(?:larksuite|feishu|larkoffice)\.(?:com|cn)/client/web_url/open\?[^\s)]+"
+)
+
+
+def card_text(node) -> str:
+    found = []
+
+    def add(value: str) -> None:
+        text = value.strip()
+        if text and text not in found:
+            found.append(text)
+
+    def walk(obj) -> None:
+        if isinstance(obj, list):
+            for item in obj:
+                walk(item)
+            return
+        if not isinstance(obj, dict):
+            return
+        if obj.get("tag") == "at":
+            add("@" + ((obj.get("user_name") or "").strip() or "someone"))
+        for key in ("text", "content", "placeholder", "title"):
+            val = obj.get(key)
+            if isinstance(val, str):
+                add(val)
+        href = obj.get("href")
+        if isinstance(href, str):
+            add(href)
+        for val in obj.values():
+            if isinstance(val, (dict, list)):
+                walk(val)
+
+    walk(node)
+    return "\n".join(found)
+
+
 def text_from_body(parsed: dict) -> str:
+    if any(key in parsed for key in ("elements", "header", "body", "title")):
+        extra = card_text(parsed)
+        if extra:
+            return extra
     if parsed.get("text"):
         return parsed["text"]
     parts = []
@@ -290,7 +338,7 @@ def bundle(items, fetch):
         if kind == "file" and item.get("file_key"):
             raw = fetch(item.get("message_id") or "", item["file_key"], "file") or b""
             line = _file_text(item.get("file_name") or "file", raw)
-        elif kind in {"text", "post"}:
+        elif kind in {"text", "post", "interactive"}:
             line = clean(show_mentions(item.get("text") or "", item.get("mentions") or {}))
         elif _keys(item):
             line = "[image]"
@@ -299,6 +347,172 @@ def bundle(items, fetch):
         if line:
             lines.append(f"{_speaker(item, labels)}: {line}")
     return "\n".join(lines), images
+
+
+def message_link_text(payload: dict) -> str:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    messages = data.get("messages") if isinstance(data, dict) else None
+    if messages is None and isinstance(payload, dict):
+        messages = payload.get("messages") or []
+    parts = []
+    for wrap in messages or []:
+        if not isinstance(wrap, dict):
+            continue
+        message = wrap.get("message") if isinstance(wrap.get("message"), dict) else wrap
+        body = message.get("body") if isinstance(message.get("body"), dict) else {}
+        content = body.get("content") if isinstance(body, dict) else ""
+        if isinstance(content, str):
+            try:
+                content = json.loads(content) if content else {}
+            except json.JSONDecodeError:
+                if content.strip():
+                    parts.append(content.strip())
+                continue
+        if isinstance(content, dict):
+            text = text_from_body(content)
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def expand_message_links(text: str, resolve) -> str:
+    def repl(match):
+        url = match.group(0)
+        try:
+            got = message_link_text(resolve(url))
+        except Exception as error:
+            return f"{url}\n[message link unread: {clean(str(error))}]"
+        if not got:
+            return f"{url}\n[message link unread]"
+        return f"{url}\n[linked message]\n{got}"
+
+    return _MESSAGE_LINK.sub(repl, text or "")
+
+
+def field_text(value) -> str:
+    if value is None or value is False:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return ", ".join(part for part in (field_text(item) for item in value) if part)
+    if isinstance(value, dict):
+        for key in ("text", "name", "link", "email"):
+            got = value.get(key)
+            if isinstance(got, str) and got.strip():
+                return got.strip()
+        return ""
+    return ""
+
+
+def record_fields_text(fields: dict) -> str:
+    lines = []
+    for name, value in fields.items():
+        shown = field_text(value)
+        if shown:
+            lines.append(f"{name}: {shown}")
+    return "\n".join(lines)
+
+
+def unwrap_record_urls(text: str) -> str:
+    def repl(match):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(match.group(0)).query)
+        target = query.get("url", [""])[0]
+        return target if _RECORD_LINK.search(target) else match.group(0)
+
+    return _WEB_URL.sub(repl, text or "")
+
+
+def expand_record_links(text: str, resolve) -> str:
+    text = unwrap_record_urls(text)
+
+    def repl(match):
+        url, token = match.group(0), match.group(1)
+        try:
+            got = record_fields_text(resolve(token))
+        except Exception as error:
+            return f"{url}\n[record link unread: {clean(str(error))}]"
+        if not got:
+            return f"{url}\n[record link unread]"
+        return f"{url}\n[linked record]\n{clean(got)}"
+
+    return _RECORD_LINK.sub(repl, text or "")
+
+
+def _lark_json(client, method: str, uri: str, body=None) -> dict:
+    from lark_oapi.core.enum import AccessTokenType, HttpMethod
+    from lark_oapi.core.model import BaseRequest
+
+    builder = (
+        BaseRequest.builder()
+        .http_method(HttpMethod[method])
+        .uri(uri)
+        .token_types({AccessTokenType.TENANT})
+    )
+    if body is not None:
+        builder = builder.body(body)
+    resp = client.request(builder.build())
+    raw = b""
+    if resp.raw is not None and resp.raw.content:
+        raw = resp.raw.content
+    try:
+        payload = json.loads(raw.decode() or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    code = payload.get("code", resp.code)
+    if code not in (0, None):
+        raise RuntimeError(payload.get("msg") or f"lark failed code={code}")
+    return payload
+
+
+def query_record_share(client, token: str) -> dict:
+    meta = _lark_json(client, "GET", f"/open-apis/base/v3/record_share/{token}/meta")
+    data = meta.get("data") if isinstance(meta.get("data"), dict) else {}
+    base, table, record = data.get("base_token"), data.get("table_id"), data.get("record_id")
+    if not base or not table or not record:
+        raise RuntimeError("record link has no table")
+    got = _lark_json(
+        client,
+        "POST",
+        f"/open-apis/bitable/v1/apps/{base}/tables/{table}/records/batch_get",
+        {"record_ids": [record]},
+    )
+    data = got.get("data") if isinstance(got.get("data"), dict) else {}
+    records = data.get("records") or []
+    fields = records[0].get("fields") if records and isinstance(records[0], dict) else {}
+    return fields if isinstance(fields, dict) else {}
+
+
+def query_message_link(client, url: str) -> dict:
+    from lark_oapi.core.enum import AccessTokenType, HttpMethod
+    from lark_oapi.core.model import BaseRequest
+
+    request = (
+        BaseRequest.builder()
+        .http_method(HttpMethod.POST)
+        .uri("/open-apis/im/v1/message_links/query")
+        .token_types({AccessTokenType.TENANT})
+        .body({"message_link_url": url})
+        .build()
+    )
+    resp = client.request(request)
+    raw = b""
+    if resp.raw is not None and resp.raw.content:
+        raw = resp.raw.content
+    try:
+        payload = json.loads(raw.decode() or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    code = payload.get("code", resp.code)
+    if code not in (0, None):
+        raise RuntimeError(payload.get("msg") or f"message link failed code={code}")
+    return payload
 
 
 def prompt_body(text: str, images: list) -> dict:
@@ -469,6 +683,61 @@ def clue_from(text: str) -> str:
     elif re.search(r"\bdevelop\b", text):
         branch = "develop"
     return " · ".join(part for part in (repo, branch) if part)
+
+
+_CODE_CHECK = (
+    "You have not read the repository. Run mobox-glab search on the platform and branch, "
+    "then mobox-glab file on the file that decides the behavior. Rewrite the summary. "
+    "Hypothesis must name that file and the condition. If the search has no hit, confidence is low "
+    "and name the command you ran."
+)
+
+
+def _tool_blob(part: dict) -> str:
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    chunks = [part.get("tool"), part.get("name"), state.get("title")]
+    entered = state.get("input") if isinstance(state.get("input"), dict) else {}
+    chunks.append(entered.get("command") or entered.get("cmd"))
+    return " ".join(str(item) for item in chunks if item).lower()
+
+
+def repo_was_read(messages) -> bool:
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        parts = item.get("parts") or item.get("content") or []
+        for part in parts:
+            if not isinstance(part, dict) or part.get("type") not in {"tool", "tool-call", "tool_use"}:
+                continue
+            blob = _tool_blob(part)
+            if "mobox-glab" in blob and ("search" in blob or "file" in blob):
+                return True
+    return False
+
+
+def needs_summary_shape(answer: str) -> bool:
+    text = answer or ""
+    if "**Hypothesis:**" in text:
+        return False
+    low = text.lower()
+    marks = ("i'll start", "i will start", "let me begin", "let me try", "i'll search", "searching for the")
+    return any(mark in low for mark in marks)
+
+
+_SUMMARY_SHAPE = (
+    "Stop. The developer sees one card. Reply with only these fields, one short sentence each. No narration.\n"
+    "**Hypothesis:** the file and the condition, or that the search had no hit\n"
+    "**FE or BE:** FE or BE and why\n"
+    "**Checked:** the branch you searched\n"
+    "**Confidence:** high, medium, or low\n"
+    "**Question:** none, or one question"
+)
+
+
+def needs_code_check(answer: str, messages) -> bool:
+    if "**Hypothesis:**" not in (answer or "") and "**Issue:**" not in (answer or ""):
+        return False
+    return not repo_was_read(messages)
 
 
 def tool_beat(messages) -> str:
@@ -755,6 +1024,8 @@ def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
             user_id = data.get("id") or ""
     last = ""
     phase = "thinking"
+    checked = False
+    shaped = False
 
     def note(event: str, detail: str = "") -> None:
         nonlocal last, phase
@@ -780,10 +1051,26 @@ def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
             note("tool", beat)
         elif shown and shown != previous and not outcome:
             note("write")
-        if fresh and reply_ready("", fresh, outcome):
-            return fresh[:12000]
-        if reply_ready(previous, reply, outcome):
-            return reply[:12000]
+        ready = fresh if fresh and reply_ready("", fresh, outcome) else ""
+        if not ready and reply_ready(previous, reply, outcome):
+            ready = reply
+        if ready:
+            nudge = ""
+            if not shaped and needs_summary_shape(ready):
+                shaped = True
+                nudge = _SUMMARY_SHAPE
+            elif not checked and needs_code_check(ready, messages):
+                checked = True
+                note("tool", "mobox-glab search")
+                nudge = _CODE_CHECK
+            if nudge:
+                follow = opencode("POST", f"/api/session/{session_id}/prompt", prompt_body(nudge, []), timeout=30)
+                previous = ready
+                data = follow.get("data") or follow if isinstance(follow, dict) else {}
+                if isinstance(data, dict) and data.get("id"):
+                    user_id = data["id"]
+                continue
+            return ready[:12000]
         if outcome and not reply and not previous:
             return f"OpenCode finished with outcome {outcome} and no text."
     return "OpenCode did not finish within 15 minutes."
@@ -812,7 +1099,16 @@ def update_text(client: lark.Client, message_id: str, text: str) -> bool:
 
 
 def update_card(client: lark.Client, message_id: str, card: dict) -> bool:
-    return _update(client, message_id, "interactive", json.dumps(card))
+    from lark_oapi.api.im.v1.model.patch_message_request import PatchMessageRequest
+    from lark_oapi.api.im.v1.model.patch_message_request_body import PatchMessageRequestBody
+
+    body = PatchMessageRequestBody.builder().content(json.dumps(card)).build()
+    request = PatchMessageRequest.builder().message_id(message_id).request_body(body).build()
+    response = client.im.v1.message.patch(request)
+    if not response.success():
+        print(f"status update failed code={response.code}", flush=True)
+        return False
+    return True
 
 
 def reply_card(client: lark.Client, message_id: str, card: dict, *, in_thread: bool = False) -> None:
@@ -1084,7 +1380,9 @@ def build_context(client, message):
             print(f"resource skipped message_id={mid} {clean(str(error))}", flush=True)
             return b""
 
-    return bundle(chosen, fetch)
+    text, images = bundle(chosen, fetch)
+    text = expand_message_links(text, lambda url: query_message_link(client, url))
+    return expand_record_links(text, lambda token: query_record_share(client, token)), images
 
 
 def handle(client: lark.Client, data) -> None:
@@ -1107,12 +1405,13 @@ def handle(client: lark.Client, data) -> None:
             if line == posted["line"]:
                 return
             posted["line"] = line
+            card = mr_flow.status_card(line)
             try:
                 if posted["id"]:
-                    update_text(client, posted["id"], line)
+                    update_card(client, posted["id"], card)
                 else:
                     posted["id"], posted["thread_id"] = _send(
-                        client, message_id, "text", json.dumps({"text": line}), in_thread=in_thread
+                        client, message_id, "interactive", json.dumps(card), in_thread=in_thread
                     )
             except Exception as error:
                 print(f"status failed {clean(str(error))}", flush=True)
@@ -1129,6 +1428,14 @@ def handle(client: lark.Client, data) -> None:
                     print(f"thread id skipped message_id={sent_id} {clean(str(error))}", flush=True)
             key = thread_session_keys(message, anchor)
             print(f"mention message_id={message_id} chars={len(clean(text))} images={len(images)}", flush=True)
+            def show_card(answer: str, action_id: str = "") -> None:
+                card = mr_flow.answer_card(answer, action_id)
+                posted["line"] = answer
+                if posted["id"]:
+                    update_card(client, posted["id"], card)
+                    return
+                reply_card(client, message_id, card, in_thread=in_thread)
+
             def on_offer(mid, answer):
                 requester = sender_open_id(data)
                 item, err = mr_flow.prepare_draft(answer, text, message_id)
@@ -1141,13 +1448,13 @@ def handle(client: lark.Client, data) -> None:
                 action_id = uuid.uuid4().hex
                 if requester:
                     pending.put(action_id, requester, payload, time.time())
-                reply_card(client, posted["id"] or mid, mr_flow.triage_card(answer, action_id), in_thread=in_thread)
+                show_card(answer, action_id)
 
             dispatch(
                 dedupe_id,
                 message_id,
                 text,
-                lambda _mid, body: show(body),
+                lambda _mid, body: show_card(body),
                 lambda body: run_agent(body, images, key, show),
                 seen,
                 on_offer,

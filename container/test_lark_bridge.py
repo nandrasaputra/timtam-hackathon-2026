@@ -239,6 +239,19 @@ class BridgeTests(unittest.TestCase):
         messages = [{"parts": [{"type": "tool", "state": {"title": "mobox-glab search gohost"}}]}]
         self.assertEqual(bridge.tool_beat(messages), "mobox-glab search gohost")
 
+    def test_root_cause_must_read_the_repo_before_the_summary(self):
+        summary = "**Issue:** payment details are empty\n**Hypothesis:** the screen skips the field"
+        self.assertTrue(bridge.needs_code_check(summary, []))
+        read = [{"parts": [{"type": "tool", "state": {"input": {"command": "mobox-glab search ios develop payment"}}}]}]
+        self.assertFalse(bridge.needs_code_check(summary, read))
+        filed = [{"parts": [{"type": "tool", "state": {"input": {"command": "mobox-glab file ios develop PaymentView.swift"}}}]}]
+        self.assertFalse(bridge.needs_code_check(summary, filed))
+        self.assertFalse(bridge.needs_code_check("Hi. Ask me about the code.", []))
+        diary = "I'll start by searching the iOS project for the payment method."
+        self.assertTrue(bridge.needs_summary_shape(diary))
+        self.assertFalse(bridge.needs_summary_shape(summary))
+        self.assertFalse(bridge.needs_summary_shape("Hi. Ask me about the code."))
+
     def test_failed_reply_is_not_remembered(self):
         tracker = bridge.Tracker()
 
@@ -719,6 +732,112 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("reproduced on staging [EMAIL]", out)
         self.assertIn("check this", out)
         self.assertLess(out.index("reproduced"), out.index("check this"))
+
+    def test_interactive_card_form_is_in_the_prompt(self):
+        card = {
+            "message_id": "om_card",
+            "sender_type": "user",
+            "message_type": "interactive",
+            "text": bridge.text_from_body(
+                {
+                    "title": "Release check",
+                    "elements": [
+                        {
+                            "tag": "form",
+                            "elements": [
+                                {
+                                    "tag": "input",
+                                    "placeholder": "5.81",
+                                    "label": {"content": "Build"},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+        }
+        out = bridge.bundle([card], lambda *_: b"")[0]
+        self.assertIn("Release check", out)
+        self.assertIn("Build", out)
+        self.assertIn("5.81", out)
+
+    def test_message_link_expansion_inserts_the_card(self):
+        url = "https://applink.larksuite.com/client/message/link/open?token=abc"
+
+        def resolve(found):
+            self.assertEqual(found, url)
+            return {
+                "data": {
+                    "messages": [
+                        {
+                            "message": {
+                                "msg_type": "interactive",
+                                "body": {
+                                    "content": json.dumps(
+                                        {"elements": [{"tag": "markdown", "content": "wiki row: fare blank"}]}
+                                    )
+                                },
+                            }
+                        }
+                    ]
+                }
+            }
+
+        out = bridge.expand_message_links(f"please read {url}", resolve)
+        self.assertIn("[linked message]", out)
+        self.assertIn("wiki row: fare blank", out)
+        self.assertLess(out.index(url), out.index("wiki row"))
+
+    def test_record_link_expansion_inserts_the_form_row(self):
+        url = "https://gotocompany.sg.larksuite.com/record/Si7zTok?ccm_open_type=im_card_workflow_button"
+
+        def resolve(token):
+            self.assertEqual(token, "Si7zTok")
+            return {
+                "Bugs Title": "fare blank",
+                "Description": [{"text": "banner missing"}],
+                "Reporter.Work email": "a@b.co",
+            }
+
+        out = bridge.expand_record_links(f"check {url}", resolve)
+        self.assertIn("[linked record]", out)
+        self.assertIn("Bugs Title: fare blank", out)
+        self.assertIn("Description: banner missing", out)
+        self.assertIn("[EMAIL]", out)
+        self.assertNotIn("a@b.co", out)
+
+    def test_wrapped_record_link_still_loads_the_row(self):
+        wrapped = (
+            "https://applink.feishu.cn/client/web_url/open?mode=sidebar-semi&url="
+            "https%3A%2F%2Fgotocompany.sg.larksuite.com%2Frecord%2FSi7zTok%3Fccm_open_type%3Drecord_message"
+        )
+
+        def resolve(token):
+            self.assertEqual(token, "Si7zTok")
+            return {"Bugs Title": "fare blank"}
+
+        out = bridge.expand_record_links(f'[Record from "FCT Bugs Report"]({wrapped})', resolve)
+        self.assertIn("[linked record]", out)
+        self.assertIn("Bugs Title: fare blank", out)
+
+    def test_unread_record_link_keeps_the_reason(self):
+        url = "https://example.larksuite.com/record/AbC123"
+
+        def resolve(_token):
+            raise RuntimeError("permission denied")
+
+        out = bridge.expand_record_links(url, resolve)
+        self.assertIn("[record link unread: permission denied]", out)
+
+    def test_unread_message_link_keeps_the_reason(self):
+        url = "https://applink.larksuite.com/client/message/link/open?token=abc"
+
+        def resolve(_url):
+            raise RuntimeError("Access denied. One of the following scopes is required: [im:message.message_link:read]")
+
+        out = bridge.expand_message_links(url, resolve)
+        self.assertIn("[message link unread:", out)
+        self.assertIn("im:message.message_link:read", out)
 
     def test_reply_keeps_root_and_parent_outside_the_page(self):
         message = SimpleNamespace(root_id="om_root", parent_id="om_qa", message_id="om_at")

@@ -35,7 +35,7 @@ Read the thread and pick one job. A request can move from one job to another, fo
 
 ## When confidence is low
 
-Still help. In plain sentences, give up to three hypotheses. Give each one the path that supports it and the check that would confirm it. End with the one fact or check that would decide between them. Do not use the summary format. Do not offer an MR.
+Still help. Do not narrate the search. In plain sentences, give up to three hypotheses. Each one names the platform, the path, and the check. End with one action item: the fact or check that would decide between them. Do not use the summary format. Do not offer an MR.
 
 ## Branch
 
