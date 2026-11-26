@@ -14,6 +14,8 @@ for name in summary_format.md fe_vs_be.md mobile_gojek.md transport_context.md c
   [[ -f "${DIR}/prompts/${name}" ]] || fail "missing prompts/${name}"
 done
 grep -q "HTTP 500" "${DIR}/prompts/fe_vs_be.md" || fail "FE vs BE rubric"
+grep -q "Ask BE to send MoBox the response" "${DIR}/prompts/fe_vs_be.md" || fail "missing API response ask"
+grep -q "Ask BE to send MoBox the response" "${DIR}/prompts/summary_format.md" || fail "action item must name the response"
 grep -q "nullable to non-null" "${DIR}/prompts/fe_vs_be.md" || fail "contract-change crash"
 grep -q "nullable to non-null" "${DIR}/prompts/mobile_gojek.md" || fail "mobile contract crash"
 grep -q "crash data unavailable" "${DIR}/prompts/summary_format.md" || fail "impact line"
@@ -50,7 +52,13 @@ if grep -q "Which branch?" "${DIR}/prompts/investigate.md"; then
 fi
 echo "${prompt}" | grep -q "Aloha" || fail "mobile skill missing"
 echo "${prompt}" | grep -q "Do not restate the bug" || fail "rca skill missing"
+echo "${prompt}" | grep -q "Do not write the summary until mobox-glab file has run" || fail "rca must read the file"
+echo "${prompt}" | grep -q "plain standard English" || fail "standard english"
+echo "${prompt}" | grep -q "Do not narrate the search" || fail "no narration"
+echo "${prompt}" | grep -q "action item" || fail "action item"
 echo "${prompt}" | grep -q "The last line is the request" || fail "thread read missing"
+echo "${prompt}" | grep -q "\[linked message\]" || fail "linked card"
+echo "${prompt}" | grep -q "\[linked record\]" || fail "linked record"
 echo "${prompt}" | grep -q "continues this session" || fail "follow-up continues"
 echo "${prompt}" | grep -q "first GoHost frame" || fail "android rca missing"
 echo "${prompt}" | grep -q "force unwrap" || fail "ios rca missing"

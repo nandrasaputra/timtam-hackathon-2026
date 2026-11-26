@@ -59,6 +59,50 @@ def _field(text: str, label: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _asked(text: str) -> str:
+    return _field(text, "Question") or _field(text, "Action Item")
+
+
+def _open_question(text: str) -> bool:
+    question = _asked(text).strip().lower().rstrip(".")
+    if not question:
+        return False
+    return question not in {"none", "no", "n/a", "na", "no question", "-"}
+
+
+def _confidence_color(value: str) -> str:
+    low = value.lower()
+    if low.startswith("high"):
+        return "green"
+    if low.startswith("medium") or low.startswith("med"):
+        return "yellow"
+    return "red"
+
+
+def triage_body(summary: str) -> str:
+    if _is_change(summary):
+        return summary[:4000]
+    hypothesis = _field(summary, "Hypothesis")
+    fe = _field(summary, "FE or BE")
+    checked = _field(summary, "Checked")
+    confidence = _field(summary, "Confidence")
+    action = _asked(summary) if _open_question(summary) else _field(summary, "Next")
+    lines = []
+    if hypothesis:
+        lines.append(f"**Hypothesis:** {hypothesis}")
+    if fe:
+        lines.append(f"**FE or BE:** {fe}")
+    if checked:
+        lines.append(f"**Checked:** {checked}")
+    if confidence:
+        lines.append(f"**Confidence:** <text_tag color='{_confidence_color(confidence)}'>{confidence}</text_tag>")
+    if lines:
+        lines.append(f"**Action Item:** {action or 'none'}")
+    elif action:
+        lines.append(f"**Action Item:** {action}")
+    return "\n\n".join(lines)[:4000] if lines else summary[:4000]
+
+
 def _is_change(text: str) -> bool:
     return "**Change:**" in text and "Raise MR?" in text
 
@@ -85,7 +129,7 @@ def is_triage(text: str) -> bool:
 
 def loading_card() -> dict:
     return {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "Opening draft MR"}},
         "elements": [
             {
@@ -101,27 +145,40 @@ def loading_card() -> dict:
 
 def result_card(text: str) -> dict:
     return {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "Draft MR" if "http" in text else "Draft MR failed"}},
         "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": text[:4000]}}],
     }
 
 
+def status_card(line: str) -> dict:
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": line[:4000]}}],
+    }
+
+
+def answer_card(text: str, action_id: str = "") -> dict:
+    if action_id and is_triage(text):
+        return triage_card(text, action_id)
+    if "**Hypothesis:**" in text or "**Confidence:**" in text:
+        return status_card(triage_body(text))
+    return status_card(text)
+
+
 def triage_card(summary: str, action_id: str) -> dict:
     change = _is_change(summary)
+    actions = []
+    if not _open_question(summary):
+        actions.append(_button("Raise MR" if change else "Raise MR fix", "raise_mr", action_id, "primary"))
+    actions.append(_button("Cross-check", "cross_check", action_id, "default"))
+    actions.append(_button("Not useful", "not_useful", action_id, "default"))
     return {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "Change" if change else "Triage"}},
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": summary[:4000]}},
-            {
-                "tag": "action",
-                "actions": [
-                    _button("Raise MR" if change else "Raise MR fix", "raise_mr", action_id, "primary"),
-                    _button("Cross-check", "cross_check", action_id, "default"),
-                    _button("Not useful", "not_useful", action_id, "default"),
-                ],
-            },
+            {"tag": "div", "text": {"tag": "lark_md", "content": triage_body(summary)}},
+            {"tag": "action", "actions": actions},
         ],
     }
 
@@ -159,7 +216,7 @@ def gitlab_assignee(requester: str) -> str:
 
 def confirm_card(action_id: str) -> dict:
     return {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "Raise draft MR?"}},
         "elements": [
             {

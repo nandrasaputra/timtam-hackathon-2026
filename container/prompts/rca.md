@@ -2,7 +2,9 @@
 
 The summary is a root cause analysis. **Issue** is the symptom. **Hypothesis** is the cause. Do not restate the bug as the hypothesis.
 
-Search the screen, symbol, or text the developer names. Read the file that decides the behavior. Cite the condition. Cross-check the other platform for that same condition. If you cannot name the condition, confidence is low: share hypotheses and the deciding check, and do not write the summary.
+Write the summary in plain standard English. Use complete sentences and correct grammar. Do not copy broken ticket wording. If the UI value comes from an API and no response was shared, do not guess the client. Ask BE to send MoBox the response.
+
+Search the screen, symbol, or text the developer names. Read the file that decides the behavior. Cite the condition. Cross-check the other platform for that same condition. Do not write the summary until mobox-glab file has run. Run mobox-glab search, then mobox-glab file, and put that path in **Hypothesis**. If you cannot name the condition, confidence is low: share hypotheses and the deciding check, and do not write the summary.
 
 Android. Cite the first GoHost frame, not an android.* or androidx.* frame. A Kotlin non-null property fed by a nullable JSON field. A Compose state or visibility flag that stays false. A click or lifecycle call after the view is gone.
 

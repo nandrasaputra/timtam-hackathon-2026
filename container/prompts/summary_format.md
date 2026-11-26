@@ -1,6 +1,8 @@
 # Reply formats
 
-A question gets plain sentences with cited paths. Use one of the two shapes below only when the rules say so. One blank line between rows. Bold the label. The value stays on that same line. Do not use ## headings. Lark prints those as plain text.
+A question gets plain sentences with cited paths. Use one of the two shapes below only when the rules say so. One blank line between rows. Bold the label. The value stays on that same line. Do not use ## headings. Lark prints those as plain text. Write every summary in plain standard English.
+
+The developer sees one message. Do not narrate the search. Do not say you will look, that a command failed, or that you are trying again. Keep every value to one short sentence. **Next** is the action item: the file or condition the developer should open.
 
 ## Bug summary
 
@@ -28,7 +30,7 @@ Use this shape for a bug when you know what is wrong and confidence is medium or
 
 **Disproof:** one check that would show the hypothesis is wrong
 
-**Question:** none, or one question that would change the diagnosis. Do not ask which branch.
+**Question:** none, or one concrete ask. When the screen value comes from an API and no response was shared, write: Ask BE to send MoBox the response, and name the screen and the missing field. Do not write a general "confirm" or "check the codebase". Do not ask which branch.
 
 Raise MR fix?
 
