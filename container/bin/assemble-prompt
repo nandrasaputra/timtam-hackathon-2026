@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cat \
+  "${DIR}/prompts/investigate.md" \
+  "${DIR}/prompts/thread_read.md" \
+  "${DIR}/prompts/summary_format.md" \
+  "${DIR}/prompts/fe_vs_be.md" \
+  "${DIR}/prompts/cross_check.md" \
+  "${DIR}/prompts/rca.md" \
+  "${DIR}/prompts/mr_review.md" \
+  "${DIR}/prompts/mobile_gojek.md" \
+  "${DIR}/prompts/transport_context.md"
