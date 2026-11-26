@@ -6,7 +6,7 @@ The developer sees one message. Do not narrate the search. Do not say you will l
 
 ## Bug summary
 
-Use this shape for a bug when you know what is wrong and confidence is medium or high. If the confidence is low, do not use it. Share hypotheses instead.
+Use this shape for a bug when you know what is wrong and confidence is medium or high. If confidence is low, use the low confidence rows instead.
 
 **Issue:** one line
 
@@ -35,6 +35,20 @@ Use this shape for a bug when you know what is wrong and confidence is medium or
 Raise MR fix?
 
 `**Checked:**` is develop when the conversation names no branch. A named branch, or an MR `source_branch`, replaces develop. A later message that names an rc branch, such as `rc/5.81.0_bm_develop`, replaces it. Impact is exactly `crash data unavailable`. The last line is `Raise MR fix?`.
+
+## Low confidence
+
+Use this shape when confidence is low. One blank line between rows. Bold the label. The value stays on that same line. Do not write a paragraph or a bullet list outside these rows. Put up to three hypotheses in **Hypothesis**. Each one names the platform, the path, and the check. Do not add `Raise MR fix?`.
+
+**Hypothesis:** the hypotheses, each with the platform, the path, and the check
+
+**FE or BE:** verdict and the evidence
+
+**Checked:** the branch searched
+
+**Confidence:** low
+
+**Question:** the one action item that decides between the hypotheses. When the screen value comes from an API and no response was shared, write: Ask BE to send MoBox the response, and name the screen and the missing field.
 
 ## Change plan
 

@@ -20,7 +20,9 @@ If `podman machine start` prints success and the machine is then `stopped`, dele
 - `GITLAB_TOKEN`: `read_api` and `read_repository` for search. A draft MR also needs push and MR create on the same token.
 - `MOBOX_GIT_EMAIL` and `MOBOX_GIT_NAME`: the draft MR commit author. GoHost's push rule rejects an email outside the company domains, so use the token owner's email.
 - `OPENCODE_SERVER_PASSWORD`: password for the local page. The username is always `opencode`.
-- `LITELLM_API_KEY`: the LiteLLM key. Default model is `litellm/agora-med`. `agora-low` and `agora-high` are in the same config. `up.sh` copies `container/opencode.json.sample` to `container/out/opencode.json` when the sample is newer.
+- `COMMANDCODE_API_KEY`: key for the default model, `commandcode/gpt-6-luna`, used by OpenCode and the Lark bridge. [Command Code Provider API](https://commandcode.ai/docs/provider)
+- `LITELLM_API_KEY`: optional key for the LiteLLM Agora models. To change the default, set `"model"` in `container/out/opencode.json` and restart. `up.sh` refreshes that file when `container/opencode.json.sample` is newer.
+- The Lark bridge reads the default model's input capabilities from `container/out/opencode.json`. GPT-6 Luna is configured for text and images. The bundled Agora models are configured for text input.
 - `LARK_APP_ID` and `LARK_APP_SECRET`: the MoBox Lark app. Leave them empty if you only use the web page.
 - `LARK_BOT_OPEN_ID`: the bot open_id. Group messages count only when this id is mentioned.
 - `LARK_TAG_OPEN_IDS`: comma-separated on-call tag open_ids. A mention of one of these in a watched channel starts the same triage.
@@ -65,7 +67,7 @@ Write it the way you would ask a teammate. Details can come across several messa
 - A small change, such as a telemetry event on both platforms, gets a change plan ending in `Raise MR?`.
 - An MR from another team that this team must approve gets an MR review: what changed, the risk, the one check before approving, and a verdict of approve or hold. MoBox does not approve or merge it.
 - A bug gets a root cause analysis. Only what is wrong and what was expected are required. Works on one platform and broken on the other is compared on both. A medium or high confidence result is one list: Issue, Platform, Where, FE or BE, Impact, Checked, Next, Hypothesis, Evidence, Confidence, Disproof, and Question, ending in `Raise MR fix?`. Low confidence gets up to three hypotheses and the check that decides them.
-- No branch and no MR link: the search uses `develop`. A later message can name a release branch such as `rc/5.81.0_bm_develop`. An MR link is enough. The branch is the MR `source_branch`. A named branch that is missing on a project is reported as missing.
+- No branch and no MR link: the search uses `develop`. A later message can name a release branch such as `rc/5.81.0_bm_develop`. An MR link is enough. The branch is the MR `source_branch`. When a named branch is missing, MoBox suggests matching names from GitLab for that project and asks before using one.
 
 Confirm on the card within 5 minutes. Only the requester can confirm. The host then shallow-clones, applies one patch, and opens a draft MR on `mobox/change-<message-id>` for a change plan, or `mobox/fix-<message-id>` for a bug, one per platform the card names. The bot does not merge, close, or retry a pipeline. The requester reviews, approves, and merges.
 

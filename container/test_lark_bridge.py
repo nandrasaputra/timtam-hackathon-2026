@@ -239,6 +239,16 @@ class BridgeTests(unittest.TestCase):
         messages = [{"parts": [{"type": "tool", "state": {"title": "mobox-glab search gohost"}}]}]
         self.assertEqual(bridge.tool_beat(messages), "mobox-glab search gohost")
 
+    def test_gitlab_tool_metadata_counts_as_a_lookup_only_when_completed(self):
+        messages = [{"content": [{
+            "type": "tool",
+            "tool": "mobox_gitlab",
+            "state": {"status": "completed", "input": {"operation": "file", "project": "ios"}},
+        }]}]
+        self.assertTrue(bridge.repo_was_read(messages))
+        messages[0]["content"][0]["state"]["status"] = "error"
+        self.assertFalse(bridge.repo_was_read(messages))
+
     def test_root_cause_must_read_the_repo_before_the_summary(self):
         summary = "**Issue:** payment details are empty\n**Hypothesis:** the screen skips the field"
         self.assertTrue(bridge.needs_code_check(summary, []))
@@ -251,6 +261,12 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(bridge.needs_summary_shape(diary))
         self.assertFalse(bridge.needs_summary_shape(summary))
         self.assertFalse(bridge.needs_summary_shape("Hi. Ask me about the code."))
+        prose = (
+            "The record reports an iOS-only issue on develop. Confidence is low.\n"
+            "- iOS hypothesis: the booking helper skips the payment field.\n"
+            "Ask BE to send MoBox the response."
+        )
+        self.assertTrue(bridge.needs_summary_shape(prose))
 
     def test_failed_reply_is_not_remembered(self):
         tracker = bridge.Tracker()
@@ -705,10 +721,158 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("secret-bytes", text)
         self.assertEqual(images[0]["mime"], "image/jpeg")
         self.assertTrue(images[0]["url"].startswith("data:image/jpeg;base64,"))
-        body = bridge.prompt_body(text, images)
+        body = bridge.prompt_body(text, images, supports_images=True)
         self.assertEqual(body["text"], text)
         self.assertEqual(body["files"], [{"uri": images[0]["url"], "name": "qa.jpg"}])
         self.assertNotIn("parts", body)
+
+    def test_linked_record_prompt_leads_with_investigation_even_after_hi(self):
+        text = "Someone: hi @MoBox can you check this?\n[linked record]\nBugs Title: Payment details missing"
+        body = bridge.prompt_body(text, [], supports_images=False)
+
+        self.assertTrue(body["text"].startswith("Investigate the request below using the linked Lark record"))
+        self.assertIn(text.replace("Someone: hi ", "Someone: "), body["text"])
+        self.assertNotIn("hi @MoBox", body["text"])
+        self.assertIn(bridge._TEXT_ONLY_EVIDENCE, body["text"])
+
+    def test_text_only_model_skips_lark_image_download(self):
+        from unittest import mock
+
+        data = event("check the screenshot")
+        message = data.event.message
+        message.message_type = "post"
+        message.content = json.dumps({"content": [[
+            {"tag": "text", "text": "check the screenshot"},
+            {"tag": "img", "image_key": "img_qa"},
+        ]]})
+        with mock.patch.object(bridge, "supports_image_input", return_value=False), \
+                mock.patch.object(bridge, "thread_id_of", return_value=""), \
+                mock.patch.object(bridge, "download_resource", return_value=b"\xff\xd8image") as download:
+            text, images = bridge.build_context(None, message)
+
+        self.assertIn("check the screenshot", text)
+        self.assertEqual(images, [])
+        download.assert_not_called()
+
+    def test_text_only_agent_gets_evidence_rules_even_without_attachments(self):
+        from unittest import mock
+
+        with mock.patch.object(bridge, "supports_image_input", return_value=False), \
+                mock.patch.object(bridge, "sessions", bridge.Sessions()), \
+                mock.patch.object(bridge, "_create_session", return_value="test"), \
+                mock.patch.object(bridge, "opencode", return_value={}) as api, \
+                mock.patch.object(bridge, "POLL_LIMIT", 0):
+            bridge.run_agent("The booking screen is blank.")
+
+        body = api.call_args.args[2]
+        self.assertIn("Booking screen is blank.".lower(), body["text"].lower())
+        self.assertIn("Do not ask for screenshots", body["text"])
+        self.assertIn("error text", body["text"])
+        self.assertNotIn("files", body)
+
+    def test_internal_code_check_does_not_repeat_image_guidance(self):
+        from unittest import mock
+
+        first_answer = "**Issue:** Payment is blank"
+        final_answer = "I could not find the cause."
+        replies = [
+            ("completed", first_answer, []),
+            ("completed", final_answer, []),
+        ]
+        with mock.patch.object(bridge, "sessions", bridge.Sessions()), \
+                mock.patch.object(bridge, "_create_session", return_value="test"), \
+                mock.patch.object(bridge, "supports_image_input", return_value=False), \
+                mock.patch.object(bridge, "opencode", return_value={}) as api, \
+                mock.patch.object(bridge, "_session_reply", side_effect=replies), \
+                mock.patch.object(bridge.time, "sleep"), \
+                mock.patch.object(bridge, "POLL_LIMIT", 2):
+            answer = bridge.run_agent("The booking screen is blank.")
+
+        self.assertEqual(answer, final_answer)
+        first_prompt, follow_up = [call.args[2]["text"] for call in api.call_args_list]
+        self.assertIn(bridge._TEXT_ONLY_EVIDENCE, first_prompt)
+        self.assertEqual(follow_up, bridge._CODE_CHECK)
+
+    def test_provider_422_retries_with_context_without_replaying_tool_outputs(self):
+        from unittest import mock
+
+        store = bridge.Sessions()
+        store.open(["thread", "alias"], lambda: "old")
+        first_prompt = bridge.prompt_body(
+            "The iOS payment method is blank.\n[linked record]", [], supports_images=False,
+        )
+        history = [
+            {"type": "user", "id": "report", "text": first_prompt["text"]},
+            {"type": "user", "id": "nudge", "text": bridge._CODE_CHECK},
+            {"type": "assistant", "content": [
+                {"type": "tool", "tool": "mobox_gitlab", "state": {
+                    "status": "completed", "input": {"operation": "file"}, "output": "Raw source dump",
+                }},
+                {"type": "text", "text": "PaymentView.swift reads paymentMethod."},
+            ]},
+        ]
+        rejected = history + [
+            {"type": "user", "id": "evidence"},
+            {"type": "assistant", "error": {"type": "provider.invalid-request", "status": 422}},
+        ]
+        answer = "The response includes paymentMethod."
+        with mock.patch.object(bridge, "sessions", store), \
+                mock.patch.object(bridge, "_create_session", return_value="new"), \
+                mock.patch.object(bridge, "supports_image_input", return_value=False), \
+                mock.patch.object(bridge, "opencode", side_effect=[{"id": "evidence"}, {"id": "retry"}]) as api, \
+                mock.patch.object(bridge, "_session_reply", side_effect=[
+                    ("succeeded", "Earlier answer", history),
+                    ("failed", "Earlier answer", rejected),
+                    ("succeeded", answer, []),
+                ]), mock.patch.object(bridge.time, "sleep"):
+            result = bridge.run_agent('API response: {"paymentMethod":"cash"}', session_key="thread")
+
+        self.assertEqual(result, answer)
+        retry = api.call_args.args
+        self.assertEqual(retry[1], "/api/session/new/prompt")
+        self.assertIn("The iOS payment method is blank.", retry[2]["text"])
+        self.assertIn("PaymentView.swift", retry[2]["text"])
+        self.assertIn('{"paymentMethod":"cash"}', retry[2]["text"])
+        self.assertEqual(retry[2]["text"].count(bridge._LINKED_RECORD_GUIDANCE), 1)
+        self.assertEqual(retry[2]["text"].count(bridge._TEXT_ONLY_EVIDENCE), 1)
+        self.assertNotIn("Raw source dump", retry[2]["text"])
+        self.assertNotIn(bridge._CODE_CHECK, retry[2]["text"])
+        self.assertEqual(store.lookup("alias"), "new")
+
+    def test_provider_422_after_first_turn_code_check_reuses_completed_file_results(self):
+        from unittest import mock
+
+        report = "Why is the iOS payment method blank?"
+        first_answer = "**Issue:** Payment is blank. **Confidence:** Medium"
+        original = {"type": "user", "id": "report", "text": report}
+        nudge = {"type": "user", "id": "nudge", "text": bridge._CODE_CHECK}
+        tool = {"type": "tool", "name": "mobox_gitlab", "state": {
+            "input": {"operation": "file", "project": "ios", "args": ["develop", "PaymentView.swift"]},
+            "status": "completed",
+            "content": [{"type": "text", "text": "paymentLabel.isHidden = paymentMethod == nil\n" + "x" * 2000}],
+        }}
+        rejected = [original, nudge, {"type": "assistant", "content": [tool]},
+                    {"type": "assistant", "error": {"type": "provider.invalid-request", "status": 422}}]
+        answer = "**Issue:** The label is hidden when paymentMethod is nil."
+        with mock.patch.object(bridge, "sessions", bridge.Sessions()), \
+                mock.patch.object(bridge, "_create_session", side_effect=["first", "new"]), \
+                mock.patch.object(bridge, "supports_image_input", return_value=False), \
+                mock.patch.object(bridge, "opencode", side_effect=[{"id": "report"}, {"id": "nudge"}, {"id": "retry"}]) as api, \
+                mock.patch.object(bridge, "_session_reply", side_effect=[
+                    ("succeeded", first_answer, [original]),
+                    ("failed", first_answer, rejected),
+                    ("succeeded", answer, []),
+                ]), mock.patch.object(bridge.time, "sleep"):
+            result = bridge.run_agent(report, session_key="thread")
+
+        self.assertEqual(result, answer)
+        retry = api.call_args.args
+        self.assertEqual(retry[1], "/api/session/new/prompt")
+        self.assertIn(report, retry[2]["text"])
+        self.assertIn("PaymentView.swift", retry[2]["text"])
+        self.assertIn("paymentMethod == nil", retry[2]["text"])
+        self.assertNotIn("x" * 2000, retry[2]["text"])
+        self.assertNotIn(bridge._CODE_CHECK, retry[2]["text"])
 
     def test_qa_mention_post_stays_when_dev_tags_the_bot(self):
         qa = SimpleNamespace(

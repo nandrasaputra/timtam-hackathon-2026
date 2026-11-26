@@ -80,7 +80,20 @@ trap 'rm -rf "${tmp}"' EXIT
 cat > "${tmp}/glab" << 'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "${GLAB_LOG}"
-printf '[]\n'
+case "$*" in
+  *'/repository/branches?search=rc%2F5.65'*)
+    printf '[{"name":"rc/5.65.0"}]\n'
+    ;;
+  *'/repository/branches/missing')
+    printf 'glab: 404 Branch Not Found (HTTP 404)\n' >&2
+    exit 1
+    ;;
+  *'/repository/branches/blocked')
+    printf 'glab: 403 Forbidden (HTTP 403)\n' >&2
+    exit 1
+    ;;
+  *) printf '[]\n' ;;
+esac
 EOF
 chmod +x "${tmp}/glab"
 
@@ -91,6 +104,13 @@ export GITLAB_TOKEN="glpat-test"
 export GOHOST_PROJECT="mobile/GoHost"
 export IOS_PROJECT="mobile/consumer-ios"
 : > "${GLAB_LOG}"
+
+[[ "$("${BIN}" branches ios 'rc/5.65')" == 'rc/5.65.0' ]] || fail "branch suggestions"
+grep -Fq 'projects/mobile%2Fconsumer-ios/repository/branches?search=rc%2F5.65' "${GLAB_LOG}" || fail "branch search encoding"
+missing="$("${BIN}" search ios missing Activate 2>&1)" && fail "missing branch accepted"
+[[ "$missing" == *"branch not found on mobile/consumer-ios: missing"* ]] || fail "missing branch error"
+blocked="$("${BIN}" search ios blocked Activate 2>&1)" && fail "blocked branch accepted"
+[[ "$blocked" == *"could not verify branch on mobile/consumer-ios: blocked"* ]] || fail "access failure mistaken for a missing branch"
 
 "${BIN}" mrs gohost opened >/dev/null
 grep -q "projects/mobile%2FGoHost/merge_requests?state=opened" "${GLAB_LOG}" || fail "mrs"

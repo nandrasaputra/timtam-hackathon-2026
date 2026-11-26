@@ -6,6 +6,7 @@ GLAB="${MOBOX_GLAB:-/opt/mobox/glab}"
 
 usage() {
   echo "usage: mobox-glab search <gohost|ios> <branch> <term>" >&2
+  echo "       mobox-glab branches <gohost|ios> <partial-branch>" >&2
   echo "       mobox-glab file <gohost|ios> <branch> <path>" >&2
   echo "       mobox-glab mrs <gohost|ios> <opened|merged|closed|all>" >&2
   echo "       mobox-glab mr <gohost|ios> <iid>" >&2
@@ -46,10 +47,16 @@ need_gitlab() {
 }
 
 branch_exists() {
-  if ! "$GLAB" api --hostname "$GITLAB_HOST" \
-    "projects/${1}/repository/branches/${2}" >/dev/null
+  local error
+  if ! error="$("$GLAB" api --hostname "$GITLAB_HOST" \
+    "projects/${1}/repository/branches/${2}" 2>&1 >/dev/null)"
   then
-    echo "branch not found on ${3}: ${4}" >&2
+    printf '%s\n' "$error" >&2
+    if [[ "$error" == *"HTTP 404"* ]]; then
+      echo "branch not found on ${3}: ${4}" >&2
+    else
+      echo "could not verify branch on ${3}: ${4}" >&2
+    fi
     exit 1
   fi
 }
@@ -85,6 +92,12 @@ case "$cmd" in
     branch_enc="$(enc "$branch")"
     branch_exists "$project_enc" "$branch_enc" "$PROJECT" "$branch"
     api "projects/${project_enc}/search?scope=blobs&search=$(enc "$term")&ref=${branch_enc}&per_page=20"
+    ;;
+  branches)
+    [[ $# -eq 2 && -n "$2" ]] || usage
+    require_project "$1"
+    project_enc="$(enc "$PROJECT")"
+    api "projects/${project_enc}/repository/branches?search=$(enc "$2")&per_page=20" | jq -r '.[].name'
     ;;
   file)
     [[ $# -eq 3 ]] || usage

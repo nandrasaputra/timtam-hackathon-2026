@@ -26,6 +26,14 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 import mr_flow
 
 OPENCODE_URL = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4096")
+_OPENCODE_CONFIG = Path(__file__).with_name("out") / "opencode.json"
+_LINKED_RECORD_GUIDANCE = "Investigate the request below using the linked Lark record as context."
+_TEXT_ONLY_EVIDENCE = (
+    "The active model cannot read images in this Lark conversation. "
+    "Treat image markers as unavailable evidence. Do not ask for screenshots, photos, "
+    "or other images. If more evidence is essential, ask for one useful text equivalent, "
+    "such as the exact error text, what the user sees, or the reproduction steps."
+)
 POLL_SECONDS = 3
 POLL_LIMIT = 300
 _PHONE = re.compile(r"\+62[\d\s-]{8,16}|\b08\d{8,13}\b")
@@ -46,6 +54,7 @@ _DEVICE = re.compile(
     re.IGNORECASE,
 )
 _MENTION = re.compile(r"@_user_\d+")
+_LEADING_GREETING = re.compile(r"^([^\n:]{1,100}:[ \t]*)?(?:hi|hallo|hola|hello|hey)\b[ \t,.!]+(?=\S)", re.I)
 
 
 def redact(text: str) -> str:
@@ -152,6 +161,19 @@ def sniff_mime(raw: bytes) -> str:
     if len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
         return "image/webp"
     return ""
+
+
+def supports_image_input() -> bool:
+    config_path = _OPENCODE_CONFIG
+    if not config_path.is_file():
+        config_path = Path(__file__).with_name("opencode.json.sample")
+    try:
+        config = json.loads(config_path.read_text())
+        provider, model = config["model"].split("/", 1)
+        input_modes = config["providers"][provider]["models"][model]["capabilities"]["input"]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return isinstance(input_modes, list) and "image" in input_modes
 
 
 def image_part(raw: bytes):
@@ -320,7 +342,7 @@ def _speaker(item, labels) -> str:
     return labels[sid]
 
 
-def bundle(items, fetch):
+def bundle(items, fetch, *, supports_images: bool = True):
     lines = []
     images = []
     labels = {}
@@ -328,19 +350,21 @@ def bundle(items, fetch):
         if item.get("sender_type") == "app":
             continue
         kind = item.get("message_type") or "text"
-        for key in _keys(item):
-            if len(images) >= 4:
-                break
-            raw = fetch(item.get("message_id") or "", key, "image") or b""
-            part = image_part(raw)
-            if part:
-                images.append(part)
+        keys = _keys(item)
+        if supports_images:
+            for key in keys:
+                if len(images) >= 4:
+                    break
+                raw = fetch(item.get("message_id") or "", key, "image") or b""
+                part = image_part(raw)
+                if part:
+                    images.append(part)
         if kind == "file" and item.get("file_key"):
             raw = fetch(item.get("message_id") or "", item["file_key"], "file") or b""
             line = _file_text(item.get("file_name") or "file", raw)
         elif kind in {"text", "post", "interactive"}:
             line = clean(show_mentions(item.get("text") or "", item.get("mentions") or {}))
-        elif _keys(item):
+        elif keys:
             line = "[image]"
         else:
             line = ""
@@ -515,8 +539,14 @@ def query_message_link(client, url: str) -> dict:
     return payload
 
 
-def prompt_body(text: str, images: list) -> dict:
-    body = {"text": text}
+def prompt_body(text: str, images: list, *, supports_images: bool) -> dict:
+    guidance = ""
+    if "[linked record]" in text:
+        guidance = _LINKED_RECORD_GUIDANCE + "\n\n"
+        text = _LEADING_GREETING.sub(r"\1", text, count=1)
+    if not supports_images:
+        return {"text": f"{guidance}{_TEXT_ONLY_EVIDENCE}\n\n{text}"}
+    body = {"text": guidance + text}
     files = [{"uri": item["url"], "name": item.get("filename") or "qa.jpg"} for item in images if item.get("url")]
     if files:
         body["files"] = files
@@ -686,8 +716,8 @@ def clue_from(text: str) -> str:
 
 
 _CODE_CHECK = (
-    "You have not read the repository. Run mobox-glab search on the platform and branch, "
-    "then mobox-glab file on the file that decides the behavior. Rewrite the summary. "
+    "You have not read the repository. Call mobox_gitlab with operation search on the platform and branch, "
+    "then call it with operation file on the GitLab path that decides the behavior. Rewrite the summary. "
     "Hypothesis must name that file and the condition. If the search has no hit, confidence is low "
     "and name the command you ran."
 )
@@ -709,6 +739,12 @@ def repo_was_read(messages) -> bool:
         for part in parts:
             if not isinstance(part, dict) or part.get("type") not in {"tool", "tool-call", "tool_use"}:
                 continue
+            state = part.get("state") or {}
+            if state.get("status") not in {None, "completed"}:
+                continue
+            if (part.get("tool") or part.get("name")) == "mobox_gitlab":
+                if (state.get("input") or {}).get("operation") in {"search", "file"}:
+                    return True
             blob = _tool_blob(part)
             if "mobox-glab" in blob and ("search" in blob or "file" in blob):
                 return True
@@ -721,7 +757,9 @@ def needs_summary_shape(answer: str) -> bool:
         return False
     low = text.lower()
     marks = ("i'll start", "i will start", "let me begin", "let me try", "i'll search", "searching for the")
-    return any(mark in low for mark in marks)
+    if any(mark in low for mark in marks):
+        return True
+    return "hypothesis" in low and ("confidence" in low or "action item" in low)
 
 
 _SUMMARY_SHAPE = (
@@ -865,6 +903,13 @@ class Sessions:
                 self._ids.pop(item, None)
             self._save()
 
+    def replace(self, old_session: str, new_session: str) -> None:
+        with self._lock:
+            for key, session in self._ids.items():
+                if session == old_session:
+                    self._ids[key] = new_session
+            self._save()
+
 
 def _ids(message) -> list[str]:
     if message is None:
@@ -934,7 +979,7 @@ def assistant_text(messages: list) -> str:
     return "\n".join(chunks).strip()
 
 
-def reply_after(messages: list, user_id: str) -> str:
+def _ordered_messages(messages: list) -> list:
     def stamp(item: dict):
         info = item.get("time")
         if not isinstance(info, dict):
@@ -948,16 +993,74 @@ def reply_after(messages: list, user_id: str) -> str:
     items = [item for item in messages or [] if isinstance(item, dict)]
     if any(stamp(item) is not None for item in items):
         items.sort(key=lambda item: stamp(item) or 0)
-    chunks = []
-    seen = False
-    for item in items:
+    return items
+
+
+def _messages_after(messages: list, user_id: str) -> list:
+    items = _ordered_messages(messages)
+    if not user_id:
+        return items
+    for index, item in enumerate(items):
         if item.get("id") == user_id:
-            seen = True
-            chunks = []
+            return items[index + 1:]
+    return []
+
+
+def reply_after(messages: list, user_id: str) -> str:
+    return assistant_text(_messages_after(messages, user_id))
+
+
+def _retry_file_evidence(messages: list) -> list[str]:
+    excerpts = []
+    for item in messages:
+        for part in item.get("content") or []:
+            if part.get("type") != "tool" or (part.get("name") or part.get("tool")) != "mobox_gitlab":
+                continue
+            state = part.get("state") or {}
+            inputs = state.get("input") or {}
+            args = inputs.get("args") or []
+            if state.get("status") != "completed" or inputs.get("operation") != "file" or len(args) != 2:
+                continue
+            text = "\n".join(_parts_text(state)).strip()
+            if text:
+                branch, path = args
+                excerpts.append(f"{inputs.get('project', '')} {branch} {path}\n{text[:1100]}")
+    return excerpts[-4:]
+
+
+def _retry_context(history: list, current: str, file_evidence: list[str]) -> tuple[str, bool]:
+    ordered = _ordered_messages(history)
+    previous_requests = []
+    for item in ordered:
+        if item.get("type") != "user":
             continue
-        if seen and item.get("type") == "assistant":
-            chunks.extend(_parts_text(item))
-    return "\n".join(chunks).strip() if seen else ""
+        text = (item.get("text") or "").removeprefix(_LINKED_RECORD_GUIDANCE + "\n\n")
+        text = text.removeprefix(_TEXT_ONLY_EVIDENCE + "\n\n").strip()
+        if text and text not in {_CODE_CHECK, _SUMMARY_SHAPE, current.strip()}:
+            previous_requests.append(text)
+    if not previous_requests and not file_evidence:
+        return "", False
+
+    parts = []
+    if previous_requests:
+        context = "\n\n".join(previous_requests)
+        if len(context) > 5000:
+            context = context[:2000] + "\n\n[Some earlier context omitted]\n\n" + context[-3000:]
+        parts.append(f"Earlier Lark messages:\n{context}")
+    prior_findings = ""
+    if repo_was_read(ordered):
+        prior_findings = next(("\n".join(_parts_text(item)) for item in reversed(ordered)
+                               if item.get("type") == "assistant" and _parts_text(item)), "")
+        if prior_findings:
+            parts.append(f"Previous investigation findings:\n{prior_findings[:2500]}")
+    if file_evidence:
+        parts.append("GitLab file excerpts from this investigation:\n" + "\n\n".join(file_evidence))
+        parts.append(
+            "Answer using these completed file reads. Cite the path and branch of any evidence you use. "
+            "If the excerpts do not establish a cause, state what is still unclear and keep confidence low."
+        )
+    parts.append(f"Latest Lark message. Use this evidence to continue the same investigation:\n{current}")
+    return "\n\n".join(parts), bool(prior_findings or file_evidence)
 
 
 sessions = Sessions(str(Path(__file__).with_name(".sessions.json")))
@@ -995,20 +1098,27 @@ def _session_reply(session_id: str):
     return session.get("outcome"), assistant_text(messages), messages
 
 
+def _admitted_user_id(admitted) -> str:
+    data = admitted.get("data") or admitted if isinstance(admitted, dict) else {}
+    return data.get("id") or "" if isinstance(data, dict) else ""
+
+
 def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
     keys = [session_key] if isinstance(session_key, str) else list(session_key or [])
     keys = [item for item in keys if item]
     previous = ""
+    history = []
     existing = next((sessions.lookup(item) for item in keys if sessions.lookup(item)), "")
     if existing:
         try:
-            _, previous, _messages = _session_reply(existing)
+            _, previous, history = _session_reply(existing)
         except Exception as error:
             if keys and session_missing(error):
                 sessions.drop(keys[0])
             previous = ""
     session_id = sessions.open(keys, _create_session)
-    body = prompt_body(text, images or [])
+    supports_images = supports_image_input()
+    body = prompt_body(text, images or [], supports_images=supports_images)
     try:
         admitted = opencode("POST", f"/api/session/{session_id}/prompt", body, timeout=30)
     except Exception as error:
@@ -1017,15 +1127,14 @@ def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
         sessions.drop(keys[0])
         session_id = sessions.open(keys, _create_session)
         admitted = opencode("POST", f"/api/session/{session_id}/prompt", body, timeout=30)
-    user_id = ""
-    if isinstance(admitted, dict):
-        data = admitted.get("data") or admitted
-        if isinstance(data, dict):
-            user_id = data.get("id") or ""
+    user_id = _admitted_user_id(admitted)
+    turn_user_id = user_id
     last = ""
     phase = "thinking"
     checked = False
     shaped = False
+    retried = False
+    reused_findings = False
 
     def note(event: str, detail: str = "") -> None:
         nonlocal last, phase
@@ -1044,6 +1153,26 @@ def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
             outcome, reply, messages = _session_reply(session_id)
         except Exception:
             continue
+        if outcome == "failed":
+            error = next((item["error"] for item in reversed(_messages_after(messages, user_id))
+                          if isinstance(item.get("error"), dict)), None)
+            if not error and user_id:
+                continue
+            if not retried and error and error.get("type") == "provider.invalid-request" and error.get("status") == 422:
+                file_evidence = _retry_file_evidence(_messages_after(messages, turn_user_id))
+                retry_text, reused_findings = _retry_context(history, text, file_evidence)
+                if retry_text:
+                    new_session = _create_session()
+                    retry_body = prompt_body(retry_text, images or [], supports_images=supports_images)
+                    admitted = opencode("POST", f"/api/session/{new_session}/prompt", retry_body, timeout=30)
+                    sessions.replace(session_id, new_session)
+                    session_id = new_session
+                    user_id = _admitted_user_id(admitted)
+                    previous = ""
+                    checked = shaped = False
+                    retried = True
+                    continue
+            return "The model could not process this request. The investigation could not be completed."
         fresh = reply_after(messages, user_id) if user_id else ""
         shown = fresh or reply
         beat = tool_beat(messages)
@@ -1059,16 +1188,15 @@ def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
             if not shaped and needs_summary_shape(ready):
                 shaped = True
                 nudge = _SUMMARY_SHAPE
-            elif not checked and needs_code_check(ready, messages):
+            elif not checked and not reused_findings and needs_code_check(ready, messages):
                 checked = True
                 note("tool", "mobox-glab search")
                 nudge = _CODE_CHECK
             if nudge:
-                follow = opencode("POST", f"/api/session/{session_id}/prompt", prompt_body(nudge, []), timeout=30)
+                follow_body = {"text": nudge}
+                follow = opencode("POST", f"/api/session/{session_id}/prompt", follow_body, timeout=30)
                 previous = ready
-                data = follow.get("data") or follow if isinstance(follow, dict) else {}
-                if isinstance(data, dict) and data.get("id"):
-                    user_id = data["id"]
+                user_id = _admitted_user_id(follow) or user_id
                 continue
             return ready[:12000]
         if outcome and not reply and not previous:
@@ -1380,7 +1508,7 @@ def build_context(client, message):
             print(f"resource skipped message_id={mid} {clean(str(error))}", flush=True)
             return b""
 
-    text, images = bundle(chosen, fetch)
+    text, images = bundle(chosen, fetch, supports_images=supports_image_input())
     text = expand_message_links(text, lambda url: query_message_link(client, url))
     return expand_record_links(text, lambda token: query_record_share(client, token)), images
 

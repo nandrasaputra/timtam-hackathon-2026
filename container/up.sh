@@ -14,6 +14,7 @@ test -f "${DIR}/.env"
 exec podman run --rm --entrypoint bash \
   -v "${DIR}/bin/mobox-glab:/usr/local/bin/mobox-glab:ro" \
   -v "${DIR}/workspace:/workspace:ro" \
+  -v "${DIR}/plugins:/workspace/.opencode/plugins:ro" \
   -v "${DIR}/out/opencode.json:/config/opencode.json:ro" \
   --env-file "${DIR}/.env" \
   -e OPENCODE_CONFIG=/config/opencode.json \

@@ -1,13 +1,20 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "litellm/agora-med",
+  "model": "commandcode/gpt-6-luna",
+  "agents": {
+    "build": {
+      "system": "You are MoBox, a support assistant for the Gojek Android and iOS apps. The mobile repositories exist on GitLab. Use the mobox_gitlab tool for all mobile source searches and file reads. Repository paths returned by the tool are GitLab paths. Use the exact branch requested for each project. If it is missing, look up nearby branch names, suggest them in your reply, and wait for the user to confirm before searching a candidate on that project."
+    }
+  },
   "permissions": [
     { "action": "generate_image", "resource": "*", "effect": "deny" },
     { "action": "generate_video", "resource": "*", "effect": "deny" },
     { "action": "websearch", "resource": "*", "effect": "deny" },
     { "action": "webfetch", "resource": "*", "effect": "deny" },
     { "action": "subagent", "resource": "*", "effect": "deny" },
-    { "action": "question", "resource": "*", "effect": "deny" }
+    { "action": "question", "resource": "*", "effect": "deny" },
+    { "action": "grep", "resource": "*", "effect": "deny" },
+    { "action": "glob", "resource": "*", "effect": "deny" }
   ],
   "providers": {
     "litellm": {
@@ -23,7 +30,7 @@
           "modelID": "agora-low",
           "capabilities": {
             "tools": true,
-            "input": ["text", "image"],
+            "input": ["text"],
             "output": ["text"]
           },
           "limit": {
@@ -36,7 +43,7 @@
           "modelID": "agora-med",
           "capabilities": {
             "tools": true,
-            "input": ["text", "image"],
+            "input": ["text"],
             "output": ["text"]
           },
           "limit": {
@@ -49,11 +56,34 @@
           "modelID": "agora-high",
           "capabilities": {
             "tools": true,
-            "input": ["text", "image"],
+            "input": ["text"],
             "output": ["text"]
           },
           "limit": {
             "context": 40960,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "commandcode": {
+      "name": "Command Code",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://api.commandcode.ai/provider/v1",
+        "apiKey": "{env:COMMANDCODE_API_KEY}"
+      },
+      "models": {
+        "gpt-6-luna": {
+          "name": "GPT-6 Luna",
+          "modelID": "gpt-6-luna",
+          "capabilities": {
+            "tools": true,
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 1000000,
             "output": 8192
           }
         }
