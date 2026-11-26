@@ -9,4 +9,3 @@ MIGRATION.md
 /container/.venv/
 /container/out/
 /container/workspace/
-/creds/openai.export.json
