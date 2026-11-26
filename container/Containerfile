@@ -1,0 +1,25 @@
+FROM debian:bookworm-slim
+
+ARG TARGETARCH
+ARG GLAB_VERSION=1.107.0
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl jq \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN set -eu \
+  && mkdir -p /opt/mobox \
+  && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${TARGETARCH}.tar.gz" -o /tmp/glab.tgz \
+  && tar -xzf /tmp/glab.tgz -C /opt/mobox --strip-components=1 bin/glab \
+  && rm /tmp/glab.tgz \
+  && test -x /opt/mobox/glab
+
+RUN curl -fsSL https://opencode.ai/v2/install | bash
+ENV PATH="/root/.opencode/bin:${PATH}"
+ENV OPENCODE_DISABLE_AUTOUPDATE=1
+
+COPY bin/mobox-glab /usr/local/bin/mobox-glab
+RUN chmod 755 /usr/local/bin/mobox-glab
+
+WORKDIR /workspace
+ENTRYPOINT ["opencode"]
