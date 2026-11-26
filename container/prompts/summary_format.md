@@ -20,7 +20,7 @@ Use this shape for a bug when you know what is wrong and confidence is medium or
 
 **Checked:** develop
 
-**Next:** one line. When Checked is develop, say a reply can name an rc branch.
+**Next:** one line. When Checked is develop and no app version was named, say a reply can name an rc branch. When an app version was named, Next is the file or condition. Do not ask them to name the branch.
 
 **Hypothesis:** the cause: the condition and the code path. Not a restatement of the issue
 
@@ -34,7 +34,7 @@ Use this shape for a bug when you know what is wrong and confidence is medium or
 
 Raise MR fix?
 
-`**Checked:**` is develop when the conversation names no branch. A named branch, or an MR `source_branch`, replaces develop. A later message that names an rc branch, such as `rc/5.81.0_bm_develop`, replaces it. Impact is exactly `crash data unavailable`. The last line is `Raise MR fix?`.
+`**Checked:**` is develop when the conversation names no branch and no app version. An app version number, such as `5.76` or `5.81.0`, is the release: search the matching `rc/` branch and name that branch in Checked. A named branch, or an MR `source_branch`, replaces develop. A later message that names an rc branch, such as `rc/5.81.0_bm_develop`, replaces it. Impact is exactly `crash data unavailable`. The last line is `Raise MR fix?`.
 
 ## Low confidence
 

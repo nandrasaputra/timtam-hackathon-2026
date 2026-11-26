@@ -1,8 +1,10 @@
 # Cross-check
 
-For a bug on one named platform, still run one cross-check search on the other project in the same turn. Android then ios. iOS then gohost. Use the same branch unless the conversation names one branch per platform. When it names none, that branch is develop.
+A named platform is the only project to search. Android is gohost. iOS is ios. Do not search the other project in the same turn.
 
-Search the same screen, API, event, or exception with `mobox-glab search`. One search on the other project.
+Search the other project only when the developer asks for a cross-check, or says it works on one platform and is broken on the other. Use the same branch unless the conversation names one branch per platform. When it names none, that branch is develop.
+
+When that comparison is requested, search the same screen, API, event, or exception. One search on the other project.
 
 When the developer says it works on one platform and not the other, the cross-check is the investigation. Read the same logic on both projects: the condition, the flag, the response field, the event name. Name what differs. A difference that explains the symptom is the hypothesis.
 

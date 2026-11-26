@@ -262,6 +262,16 @@ def projects_from(text: str) -> list[str]:
     return found
 
 
+def checked_branch(text: str) -> str:
+    checked = _field(text, "Checked")
+    if not checked:
+        return ""
+    token = checked.strip("`").split()[0].rstrip(".,")
+    if re.fullmatch(r"[A-Za-z0-9._/-]+", token):
+        return token
+    return ""
+
+
 def branch_from(text: str) -> str:
     match = _RC.search(text)
     if match:
@@ -278,7 +288,7 @@ def prepare_draft(summary: str, source: str, message_id: str):
     projects = projects_from(summary)
     if not projects:
         return None, "Name Android or iOS before a draft MR."
-    branch = branch_from(source) or branch_from(summary) or "develop"
+    branch = checked_branch(summary) or branch_from(source) or branch_from(summary) or "develop"
     issue = re.sub(r"[^A-Za-z0-9._-]", "-", message_id).strip("-")[:40] or "issue"
     return {
         "projects": projects,

@@ -5,6 +5,30 @@ import cursor_agent
 import cursor_agent_server
 
 
+class ModelSelectionTest(unittest.TestCase):
+    def test_model_selection_keeps_a_plain_id(self):
+        self.assertEqual(cursor_agent.model_selection("grok-4.7"), "grok-4.7")
+
+    def test_model_selection_passes_fast_param(self):
+        raw = '{"id":"composer-2.5","params":[{"id":"fast","value":"true"}]}'
+        self.assertEqual(
+            cursor_agent.model_selection(raw),
+            {"id": "composer-2.5", "params": [{"id": "fast", "value": "true"}]},
+        )
+
+
+class TurnErrorTest(unittest.TestCase):
+    def test_blocked_model_message_is_kept(self):
+        error, reply = cursor_agent.turn_error("error", "", "Model Blocked")
+        self.assertEqual(error["message"], "Model Blocked")
+        self.assertEqual(reply, "")
+
+    def test_finished_run_keeps_the_reply(self):
+        error, reply = cursor_agent.turn_error("finished", "pong", "")
+        self.assertIsNone(error)
+        self.assertEqual(reply, "pong")
+
+
 class RequestPathTest(unittest.TestCase):
     def test_absolute_form_is_the_path(self):
         self.assertEqual(
@@ -15,6 +39,25 @@ class RequestPathTest(unittest.TestCase):
     def test_plain_path_stays(self):
         self.assertEqual(cursor_agent_server.request_path("/v1/prompt?x=1"), "/v1/prompt")
         self.assertEqual(cursor_agent_server.request_path("/"), "/")
+
+
+class BuiltinToolsTest(unittest.TestCase):
+    def test_only_the_gitlab_tool_stays_on(self):
+        self.assertEqual(cursor_agent.builtin_tools(), ["mcp"])
+
+    def test_system_prompt_forbids_exploring(self):
+        text = cursor_agent.system_prompt()
+        self.assertIn("two searches", text)
+        self.assertIn("Do not keep exploring", text)
+        self.assertIn("plain sentences", text)
+        self.assertIn("Do not call mobox_gitlab", text)
+        self.assertIn("Read it", text)
+
+    def test_lookup_stops_after_the_budget(self):
+        self.assertEqual(cursor_agent.guarded_lookup(6, lambda: "ran"), cursor_agent.STOP_LOOKUP)
+
+    def test_lookup_runs_before_the_budget(self):
+        self.assertEqual(cursor_agent.guarded_lookup(5, lambda: "ran"), "ran")
 
 
 class GitlabToolTest(unittest.TestCase):

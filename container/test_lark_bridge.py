@@ -6,6 +6,58 @@ from types import SimpleNamespace
 import lark_bridge as bridge
 
 
+class PlatformFocusTest(unittest.TestCase):
+    def test_named_ios_skips_android(self):
+        self.assertEqual(bridge.platform_scope("Platform: iOS\nApp Version: 5.81 RC"), "ios")
+
+    def test_both_platforms_stay_open(self):
+        self.assertEqual(bridge.platform_scope("works on Android and broken on iOS"), "")
+
+    def test_named_ios_does_not_fetch_a_tree(self):
+        used = []
+
+        def branches(project, fragment):
+            used.append(("branches", project))
+            return "rc/5.81.0_bm_develop\n"
+
+        def use(project, branch):
+            used.append(("use", project))
+            return True
+
+        text = bridge.apply_local_checkouts("Platform: iOS\nApp Version: 5.81.0 RC", branches, use, develop_present=True)
+        self.assertEqual(used, [])
+        self.assertIn("Search only ios/", text)
+        self.assertNotIn("gohost/", text)
+        self.assertNotIn("Do not call mobox_gitlab", text)
+
+
+class RcVersionTest(unittest.TestCase):
+    def test_rc_app_version_searches_that_release(self):
+        hint = bridge.rc_branch_hint("App Version: 5.81.0 RC\nBugs Title: fare blank")
+        self.assertIn("5.81.0", hint)
+        self.assertIn("branches", hint)
+        self.assertIn("develop", hint)
+
+    def test_app_version_number_searches_that_release(self):
+        hint = bridge.rc_branch_hint("AE App Version: 5.76\nBugs Title: fare blank")
+        self.assertIn("5.76", hint)
+        self.assertIn("branches", hint)
+        self.assertIn("Do not use develop", hint)
+
+    def test_version_without_a_number_stays_quiet(self):
+        self.assertEqual(bridge.rc_branch_hint("App Version: latest"), "")
+
+    def test_rc_hint_stays_with_a_linked_record(self):
+        body = bridge.prompt_body("[linked record]\nApp Version: 5.81 RC", [], supports_images=True)
+        self.assertIn("branches", body["text"])
+        self.assertIn("linked Lark record", body["text"])
+
+    def test_rc_hint_leads_the_prompt(self):
+        body = bridge.prompt_body("App Version: 5.81.0-rc1\nfare blank", [], supports_images=True)
+        self.assertLess(body["text"].index("5.81.0"), body["text"].index("fare blank"))
+        self.assertIn("branches", body["text"])
+
+
 def event(text, *, chat_id="oc_hack", sender="user", mentions=("ou_bot",), chat_type="group"):
     return SimpleNamespace(
         event=SimpleNamespace(
@@ -554,6 +606,7 @@ class BridgeTests(unittest.TestCase):
 
         said = []
         updated = []
+        sent = []
         bridge.pending = bridge.mr_flow.Pending()
         bridge.pending.put("a1", "ou_me", {"projects": ["gohost", "ios"], "branch": "develop", "issue": "om_1"}, 0)
         data = SimpleNamespace(event=SimpleNamespace(
@@ -562,20 +615,26 @@ class BridgeTests(unittest.TestCase):
             context=SimpleNamespace(open_message_id="om_card"),
         ))
         result = "gohost: https://mr/1\nios: Draft MR failed: corrupt patch"
+
+        def send(_c, mid, msg_type, content, in_thread=False):
+            sent.append((mid, msg_type, content, in_thread))
+            return "om_wait", "omt_1"
+
         with mock.patch.object(bridge.time, "time", return_value=1), \
                 mock.patch.object(bridge.threading, "Thread", Now), \
                 mock.patch.object(bridge, "run_draft", return_value=result), \
                 mock.patch.object(bridge, "reply", lambda _c, _m, text: said.append(text)), \
-                mock.patch.object(bridge, "update_card", lambda _c, _m, card: updated.append(card)):
+                mock.patch.object(bridge, "_send", send), \
+                mock.patch.object(bridge, "update_card", lambda _c, mid, card: updated.append((mid, card))):
             response = bridge.on_card(SimpleNamespace(), data)
             self.assertEqual(bridge.pending.peek("a1", 2)["projects"], ["ios"])
-        self.assertEqual(response.card.type, "raw")
-        self.assertIn("still working", response.card.data["elements"][0]["text"]["content"])
-        self.assertNotIn("action", [item["tag"] for item in response.card.data["elements"]])
-        self.assertIn("https://mr/1", said[-1])
-        self.assertIn("Raise MR", said[-1])
-        self.assertTrue(updated)
-        self.assertNotIn("still working", updated[-1]["elements"][0]["text"]["content"])
+        self.assertFalse(getattr(response, "card", None))
+        self.assertEqual(sent[0][0], "om_card")
+        self.assertTrue(sent[0][3])
+        self.assertIn("still working", sent[0][2])
+        self.assertEqual(updated[0][0], "om_wait")
+        self.assertIn("https://mr/1", updated[0][1]["elements"][0]["text"]["content"])
+        self.assertEqual(said, [])
 
     def test_follow_up_mention_sends_only_unsent_lines(self):
         bridge.thread_log = bridge.ThreadLog()
@@ -944,6 +1003,55 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("[linked message]", out)
         self.assertIn("wiki row: fare blank", out)
         self.assertLess(out.index(url), out.index("wiki row"))
+
+    def test_screen_record_image_is_attached(self):
+        fields = {
+            "Screen Records": [{
+                "file_token": "boxcn1",
+                "name": "1000007928.jpeg",
+                "type": "image/jpeg",
+            }],
+            "Logs": [{"file_token": "boxcn2", "name": "log.txt", "type": "text/plain"}],
+        }
+        seen = []
+
+        def fetch(item):
+            seen.append(item["file_token"])
+            return b"\xff\xd8\xff" + b"jpeg"
+
+        images = bridge.record_images(fields, fetch)
+        self.assertEqual(seen, ["boxcn1"])
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["mime"], "image/jpeg")
+        self.assertIn("Screen Records: 1000007928.jpeg [image]", bridge.record_fields_text(fields))
+        self.assertNotIn("log.txt [image]", bridge.record_fields_text(fields))
+        extra = bridge.bitable_extra("tbl1", "fld1", "rec1", "boxcn1")
+        self.assertIn("tbl1", extra)
+        self.assertIn("fld1", extra)
+        self.assertIn("boxcn1", extra)
+
+    def test_advanced_base_image_uses_the_temp_url(self):
+        fields = {
+            "Screen Records": [{
+                "file_token": "boxcn1",
+                "name": "1000007928.jpeg",
+                "type": "image/jpeg",
+                "url": 'https://open.larksuite.com/open-apis/drive/v1/medias/boxcn1/download?extra=%7B%22bitablePerm%22%3A%7B%22tableId%22%3A%22tbl1%22%2C%22rev%22%3A5%7D%7D',
+            }],
+        }
+        item = bridge.record_attachments(fields)[0]
+        self.assertEqual(bridge.attachment_extra(item), '{"bitablePerm":{"tableId":"tbl1","rev":5}}')
+        payload = {"data": {"tmp_download_urls": [{"file_token": "boxcn1", "tmp_download_url": "https://files.example/a"}]}}
+        self.assertEqual(bridge.tmp_media_url(payload, "boxcn1"), "https://files.example/a")
+        seen = []
+
+        def opener(url):
+            seen.append(url)
+            return b"\xff\xd8\xff" + b"jpeg"
+
+        raw = bridge.download_tmp_media(None, "boxcn1", bridge.attachment_extra(item), opener, lambda *_a, **_k: payload)
+        self.assertEqual(seen, ["https://files.example/a"])
+        self.assertTrue(raw.startswith(b"\xff\xd8\xff"))
 
     def test_record_link_expansion_inserts_the_form_row(self):
         url = "https://gotocompany.sg.larksuite.com/record/Si7zTok?ccm_open_type=im_card_workflow_button"

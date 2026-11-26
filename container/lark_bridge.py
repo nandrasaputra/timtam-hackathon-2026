@@ -27,6 +27,9 @@ import mr_flow
 
 CURSOR_AGENT_URL = os.environ.get("CURSOR_AGENT_URL", "http://127.0.0.1:4096")
 _LINKED_RECORD_GUIDANCE = "Investigate the request below using the linked Lark record as context."
+_VERSION_LINE = re.compile(r"(?im)^(?P<label>[^:\n]*version[^:\n]*):\s*(?P<value>.+)$")
+_RC_BRANCH = re.compile(r"rc/[A-Za-z0-9._-]+", re.IGNORECASE)
+_VERSION_NUMBER = re.compile(r"\d+\.\d+(?:\.\d+)?")
 _TEXT_ONLY_EVIDENCE = (
     "The active model cannot read images in this Lark conversation. "
     "Treat image markers as unavailable evidence. Do not ask for screenshots, photos, "
@@ -420,10 +423,100 @@ def field_text(value) -> str:
     return ""
 
 
+_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def record_attachments(fields: dict) -> list[dict]:
+    found = []
+    for name, value in (fields or {}).items():
+        items = value if isinstance(value, list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            token = item.get("file_token")
+            if not isinstance(token, str) or not token:
+                continue
+            filename = str(item.get("name") or "")
+            mime = str(item.get("type") or "")
+            if not (mime.startswith("image/") or filename.lower().endswith(_IMAGE_EXT)):
+                continue
+            found.append({
+                "field": name,
+                "file_token": token,
+                "filename": filename,
+                "url": str(item.get("url") or ""),
+            })
+    return found
+
+
+def attachment_extra(item: dict) -> str:
+    url = str((item or {}).get("url") or "")
+    got = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("extra") or []
+    return got[0] if got else ""
+
+
+def tmp_media_url(payload: dict, file_token: str) -> str:
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    urls = data.get("tmp_download_urls") if isinstance(data, dict) else []
+    for row in urls or []:
+        if isinstance(row, dict) and row.get("file_token") == file_token:
+            url = row.get("tmp_download_url")
+            if isinstance(url, str):
+                return url
+    return ""
+
+
+def _read_url(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=20) as resp:
+        return resp.read()
+
+
+def download_tmp_media(client, file_token: str, extra: str, opener=None, ask=None) -> bytes:
+    # ponytail: advanced-permission Bases 403 the direct media GET. The temp URL works.
+    from urllib.parse import quote
+
+    uri = (
+        "/open-apis/drive/v1/medias/batch_get_tmp_download_url"
+        f"?file_tokens={quote(file_token, safe='')}&extra={quote(extra, safe='')}"
+    )
+    url = tmp_media_url((ask or _lark_json)(client, "GET", uri), file_token)
+    if not url:
+        return b""
+    return (opener or _read_url)(url)
+
+
+def record_images(fields: dict, fetch, *, limit: int = 4) -> list:
+    parts = []
+    for item in record_attachments(fields):
+        if len(parts) >= limit:
+            break
+        try:
+            raw = fetch(item) or b""
+        except Exception as error:
+            print(f"record image skipped token={item['file_token']} {clean(str(error))}", flush=True)
+            continue
+        part = image_part(raw)
+        if part:
+            parts.append(part)
+    return parts
+
+
+def bitable_extra(table_id: str, field_id: str, record_id: str, file_token: str) -> str:
+    return json.dumps({
+        "bitablePerm": {
+            "tableId": table_id,
+            "attachments": {field_id: {record_id: [file_token]}},
+        }
+    }, separators=(",", ":"))
+
+
 def record_fields_text(fields: dict) -> str:
     lines = []
+    images = {item["field"] for item in record_attachments(fields)}
     for name, value in fields.items():
         shown = field_text(value)
+        if shown and name in images:
+            shown = f"{shown} [image]"
         if shown:
             lines.append(f"{name}: {shown}")
     return "\n".join(lines)
@@ -483,6 +576,10 @@ def _lark_json(client, method: str, uri: str, body=None) -> dict:
 
 
 def query_record_share(client, token: str) -> dict:
+    return _shared_record(client, token)[0]
+
+
+def _shared_record(client, token: str) -> tuple:
     meta = _lark_json(client, "GET", f"/open-apis/base/v3/record_share/{token}/meta")
     data = meta.get("data") if isinstance(meta.get("data"), dict) else {}
     base, table, record = data.get("base_token"), data.get("table_id"), data.get("record_id")
@@ -497,7 +594,65 @@ def query_record_share(client, token: str) -> dict:
     data = got.get("data") if isinstance(got.get("data"), dict) else {}
     records = data.get("records") or []
     fields = records[0].get("fields") if records and isinstance(records[0], dict) else {}
-    return fields if isinstance(fields, dict) else {}
+    fields = fields if isinstance(fields, dict) else {}
+    return base, table, record, fields
+
+
+def _field_ids(client, base: str, table: str) -> dict:
+    got = _lark_json(client, "GET", f"/open-apis/bitable/v1/apps/{base}/tables/{table}/fields?page_size=100")
+    data = got.get("data") if isinstance(got.get("data"), dict) else {}
+    return {
+        item.get("field_name"): item.get("field_id")
+        for item in data.get("items") or []
+        if isinstance(item, dict) and item.get("field_name") and item.get("field_id")
+    }
+
+
+def download_bitable_file(client, file_token: str, extra: str) -> bytes:
+    from urllib.parse import quote
+    from lark_oapi.core.enum import AccessTokenType, HttpMethod
+    from lark_oapi.core.model import BaseRequest
+
+    uri = f"/open-apis/drive/v1/medias/{file_token}/download?extra={quote(extra, safe='')}"
+    request = (
+        BaseRequest.builder()
+        .http_method(HttpMethod.GET)
+        .uri(uri)
+        .token_types({AccessTokenType.TENANT})
+        .build()
+    )
+    resp = client.request(request)
+    raw = b""
+    if resp.raw is not None and resp.raw.content:
+        raw = resp.raw.content
+    if raw[:1] in (b"{", b"["):
+        try:
+            payload = json.loads(raw.decode() or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("code") not in (0, None):
+            raise RuntimeError(payload.get("msg") or f"lark failed code={payload.get('code')}")
+    return raw
+
+
+def load_shared_record(client, token: str) -> tuple:
+    base, table, record, fields = _shared_record(client, token)
+    if not supports_image_input() or not record_attachments(fields):
+        return fields, []
+    ids = _field_ids(client, base, table)
+
+    def fetch(item):
+        extra = attachment_extra(item)
+        if extra:
+            return download_tmp_media(client, item["file_token"], extra)
+        field_id = ids.get(item["field"]) or ""
+        if not field_id:
+            return b""
+        return download_bitable_file(
+            client, item["file_token"], bitable_extra(table, field_id, record, item["file_token"]),
+        )
+
+    return fields, record_images(fields, fetch)
 
 
 def query_message_link(client, url: str) -> dict:
@@ -528,10 +683,60 @@ def query_message_link(client, url: str) -> dict:
     return payload
 
 
+def rc_target(text: str) -> str:
+    for match in _VERSION_LINE.finditer(text or ""):
+        value = match.group("value").strip()
+        exact = _RC_BRANCH.search(value)
+        if exact:
+            return exact.group(0)
+        number = _VERSION_NUMBER.search(value)
+        if number:
+            return number.group(0)
+    return ""
+
+
+def rc_branch_hint(text: str) -> str:
+    target = rc_target(text)
+    if not target:
+        return ""
+    if target.startswith("rc/"):
+        return f"App version names branch {target}. Search that branch. Do not use develop."
+    return (
+        f"App version {target} is the release to search. "
+        f"Call mobox_gitlab branches with {target!r} on each project you check. "
+        "Use a matching rc/ branch. Do not use develop."
+    )
+
+
+def platform_scope(text: str) -> str:
+    low = (text or "").lower()
+    android = re.search(r"\bandroid\b|\bgohost\b", low) is not None
+    ios = re.search(r"\bios\b|\biphone\b|\bconsumer-ios\b", low) is not None
+    if android == ios:
+        return ""
+    return "gohost" if android else "ios"
+
+
+def focus_line(scope: str) -> str:
+    if scope == "ios":
+        return "Search only ios/. Do not search gohost unless the developer asks for a cross-check."
+    if scope == "gohost":
+        return "Search only gohost/. Do not search ios unless the developer asks for a cross-check."
+    return ""
+
+
+def apply_local_checkouts(text: str, list_branches=None, use_checkout=None, *, develop_present: bool = False) -> str:
+    line = focus_line(platform_scope(text))
+    return f"{line}\n\n{text}" if line else text
+
+
 def prompt_body(text: str, images: list, *, supports_images: bool) -> dict:
     guidance = ""
+    hint = rc_branch_hint(text)
+    if hint:
+        guidance = hint + "\n\n"
     if "[linked record]" in text:
-        guidance = _LINKED_RECORD_GUIDANCE + "\n\n"
+        guidance = _LINKED_RECORD_GUIDANCE + "\n\n" + guidance
         text = _LEADING_GREETING.sub(r"\1", text, count=1)
     if not supports_images:
         return {"text": f"{guidance}{_TEXT_ONLY_EVIDENCE}\n\n{text}"}
@@ -1082,6 +1287,7 @@ def _remember(keys: list[str], previous: str, session_id: str) -> None:
 
 
 def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
+    text = apply_local_checkouts(text)
     keys = [session_key] if isinstance(session_key, str) else list(session_key or [])
     keys = [item for item in keys if item]
     existing = next((sessions.lookup(item) for item in keys if sessions.lookup(item)), "")
@@ -1328,6 +1534,13 @@ def on_card(client: lark.Client, data):
         return _toast("expired or not your request")
 
     def work():
+        wait_id = ""
+        try:
+            wait_id, _thread = _send(
+                client, message_id, "interactive", json.dumps(mr_flow.loading_card()), in_thread=True,
+            )
+        except Exception as error:
+            print(f"draft status failed {clean(str(error))}", flush=True)
         try:
             result = run_draft(item)
         except Exception as error:
@@ -1338,17 +1551,18 @@ def on_card(client: lark.Client, data):
         if left:
             pending.put(action_id, clicker, {**item, "projects": left}, time.time())
             result += "\nTap Raise MR on the card again to retry " + ", ".join(left) + "."
-        summary = item.get("summary", "")
-        shown = mr_flow.triage_card(summary, action_id) if left and mr_flow.is_triage(summary) else mr_flow.result_card(result)
-        if message_id:
+        shown = mr_flow.result_card(result)
+        if wait_id:
             try:
-                update_card(client, message_id, shown)
+                update_card(client, wait_id, shown)
             except Exception as error:
                 print(f"card update failed {clean(str(error))}", flush=True)
-        reply(client, message_id, result)
+                reply(client, message_id, result)
+        else:
+            reply(client, message_id, result)
 
     threading.Thread(target=work, daemon=True).start()
-    return _toast("opening draft MR", mr_flow.loading_card())
+    return _toast("opening draft MR")
 
 
 def list_thread_items(client, thread_id: str) -> list[dict]:
@@ -1471,7 +1685,15 @@ def build_context(client, message):
 
     text, images = bundle(chosen, fetch, supports_images=supports_image_input())
     text = expand_message_links(text, lambda url: query_message_link(client, url))
-    return expand_record_links(text, lambda token: query_record_share(client, token)), images
+    record_images_found = []
+
+    def resolve(token):
+        fields, parts = load_shared_record(client, token)
+        record_images_found.extend(parts)
+        return fields
+
+    text = expand_record_links(text, resolve)
+    return text, (images + record_images_found)[:4]
 
 
 def handle(client: lark.Client, data) -> None:

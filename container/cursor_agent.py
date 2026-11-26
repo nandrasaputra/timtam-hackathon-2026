@@ -113,13 +113,49 @@ def _images(payload: dict):
     return images
 
 
+def builtin_tools() -> list[str]:
+    # mcp is mobox_gitlab. An empty list drops that tool too.
+    return ["mcp"]
+
+
+LOOKUP_BUDGET = 6
+STOP_LOOKUP = "Stop. Reply with the summary from the lookups you already have. Do not call this tool again."
+
+
+def system_prompt() -> str:
+    return (
+        "You are MoBox, a mobile support buddy. "
+        "A code check is a bug, a where-is-this, or a why-does-this-behave question about the repo. "
+        "For a code check, use only the mobox_gitlab tool. "
+        "At most two searches and two file reads, then answer. Do not narrate. Do not keep exploring. "
+        "Reply with only these fields, one short sentence each: "
+        "**Hypothesis:** **FE or BE:** **Checked:** **Confidence:** **Question:** "
+        "Any other message in the conversation is answered in plain sentences from the thread. "
+        "Do not call mobox_gitlab. Do not repeat the investigation card. "
+        "An attached image is the form screenshot. Read it. Do not ask the developer to paste it."
+    )
+
+
+def guarded_lookup(used: int, run):
+    if used >= LOOKUP_BUDGET:
+        return STOP_LOOKUP
+    return run()
+
+
+def model_selection(raw: str):
+    text = (raw or "").strip()
+    if text.startswith("{"):
+        return json.loads(text)
+    return text or "grok-4.7"
+
+
 def _options(captured: list):
     from cursor_sdk import AgentOptions, CustomTool, LocalAgentOptions
 
     def execute(args, _context):
         tool_args = dict(args or {})
         try:
-            output = mobox_gitlab(tool_args)
+            output = guarded_lookup(len(captured), lambda: mobox_gitlab(tool_args))
         except Exception as error:
             captured.append({"args": tool_args, "status": "error", "output": str(error)})
             raise
@@ -127,22 +163,31 @@ def _options(captured: list):
         return output
 
     cwd = os.environ.get("CURSOR_AGENT_CWD", "/workspace")
-    return AgentOptions(
-        model=os.environ.get("CURSOR_MODEL", "grok-4.7"),
+
+    class _PromptOptions(AgentOptions):
+        def to_json(self):
+            payload = super().to_json()
+            payload["systemPrompt"] = system_prompt()
+            return payload
+
+    return _PromptOptions(
+        model=model_selection(os.environ.get("CURSOR_MODEL", "grok-4.7")),
         api_key=os.environ.get("CURSOR_API_KEY") or "",
         name="MoBox",
-        disallowed_tools=["shell", "edit", "task", "webSearch"],
+        tools=builtin_tools(),
         local=LocalAgentOptions(
             cwd=cwd,
             setting_sources=["project"],
             custom_tools={
                 "mobox_gitlab": CustomTool(
                     description=(
-                        "Run the read-only mobox-glab wrapper against GitLab. Use project gohost for Android and ios for iOS. "
-                        "For branches pass [partial_branch] to find matching branch names on that project. "
-                        "For search pass [branch, term]. For file pass [branch, path] and optionally set start_line for an excerpt. "
+                        "Run the read-only mobox-glab wrapper against GitLab. Use this for every source search and file read. "
+                        "Android is gohost and iOS is ios. "
+                        "For branches pass [partial_branch]. "
+                        "For search pass [branch, term]. For file pass [branch, path]. "
+                        "At most two searches and two file reads, then answer. "
                         "For mr or diff pass [iid]. For mrs pass [state], pipelines [branch], trace [job_id], issues [label] or [], "
-                        "commits [branch, path], and crash []. Repository paths are on GitLab."
+                        "commits [branch, path], and crash []."
                     ),
                     input_schema={
                         "type": "object",
@@ -186,6 +231,15 @@ def _record(session_id: str, user_id: str, text: str, captured: list, reply: str
     return list(items)
 
 
+def turn_error(status: str, reply: str, error_message: str):
+    if status != "error":
+        return None, reply
+    text = reply or error_message or ""
+    if _context_overflow(text):
+        return {"type": "provider.invalid-request", "status": 422}, ""
+    return {"type": "cursor-agent", "status": 500, "message": text[:500]}, ""
+
+
 def clear_transcripts() -> None:
     _TRANSCRIPTS.clear()
 
@@ -218,17 +272,12 @@ def run_prompt(payload: dict) -> dict:
             raise MissingSession(message) from error
         raise RuntimeError(message) from error
 
-    reply = result.result or ""
-    failed = result.status == "error"
-    error = None
-    if failed and _context_overflow(reply):
-        # Same shape the Lark bridge already retries once, in a fresh session.
-        error = {"type": "provider.invalid-request", "status": 422}
-    elif failed:
-        error = {"type": "cursor-agent", "status": 500, "message": reply[:500]}
-    messages = _record(session_id, user_id, text, captured, "" if failed else reply, error)
+    error, reply = turn_error(result.status, result.result or "", result.error_message or "")
+    failed = error is not None
+    messages = _record(session_id, user_id, text, captured, reply, error)
     workspace = Path(os.environ.get("CURSOR_AGENT_CWD", "/workspace"))
-    print(f"cursor-agent session={session_id} status={result.status} cwd={workspace}", flush=True)
+    detail = (error or {}).get("message") or ""
+    print(f"cursor-agent session={session_id} status={result.status} cwd={workspace} error={detail[:300]}", flush=True)
     return {
         "session_id": session_id,
         "user_id": user_id,

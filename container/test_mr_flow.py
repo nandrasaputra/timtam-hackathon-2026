@@ -191,6 +191,13 @@ class MrFlowTests(unittest.TestCase):
         item, err = mr_flow.prepare_draft("Platform: iOS", "green banner missing", "om_2")
         self.assertIsNone(err)
         self.assertEqual(item["branch"], "develop")
+        checked = (
+            "**Hypothesis:** the boost label overflows\n**Platform:** Android\n"
+            "**Checked:** rc-5.76\n**Confidence:** medium\nRaise MR fix?"
+        )
+        item, err = mr_flow.prepare_draft(checked, "App Version: 5.76\ndevelop", "om_4")
+        self.assertIsNone(err)
+        self.assertEqual(item["branch"], "rc-5.76")
 
     def test_confirm_action_calls_draft_once(self):
         pending = mr_flow.Pending()

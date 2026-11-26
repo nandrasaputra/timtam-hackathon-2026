@@ -44,6 +44,8 @@ if grep -q "\*\*Hypothesis" "${DIR}/prompts/investigate.md"; then
 fi
 grep -q "source_branch" "${DIR}/prompts/investigate.md" || fail "MR branch"
 grep -q "Do not ask which branch" "${DIR}/prompts/investigate.md" || fail "MR link rule"
+grep -q "is the release to search" "${DIR}/prompts/investigate.md" || fail "rc app version"
+grep -q "Use the mobox_gitlab tool for all mobile source searches" "${DIR}/prompts/investigate.md" || fail "gitlab is the only code search"
 grep -q "develop" "${DIR}/prompts/summary_format.md" || fail "default branch"
 grep -q "plain sentences" "${DIR}/prompts/investigate.md" || fail "ask before triage"
 grep -q "confidence is low" "${DIR}/prompts/investigate.md" || fail "low confidence asks"
@@ -63,7 +65,10 @@ echo "${prompt}" | grep -q "continues this session" || fail "follow-up continues
 echo "${prompt}" | grep -q "first GoHost frame" || fail "android rca missing"
 echo "${prompt}" | grep -q "force unwrap" || fail "ios rca missing"
 echo "${prompt}" | grep -q "GoCar" || fail "transport skill missing"
-grep -q "one cross-check search" "${DIR}/prompts/cross_check.md" || fail "cross-check rule"
+grep -q "search only that project" "${DIR}/prompts/investigate.md" || fail "named platform stays on one repo"
+grep -q "not a new code check" "${DIR}/prompts/investigate.md" || fail "conversation skips glab"
+grep -q "form attachment, already sent" "${DIR}/prompts/investigate.md" || fail "form image is read"
+grep -q "only project to search" "${DIR}/prompts/cross_check.md" || fail "cross-check rule"
 grep -q "not found" "${DIR}/prompts/cross_check.md" || fail "missing other-platform result"
 grep -q "same session" "${DIR}/prompts/cross_check.md" || fail "cross-check keeps the session"
 if grep -q "new session" "${DIR}/prompts/cross_check.md"; then
@@ -72,7 +77,7 @@ fi
 if grep -q "search gohost only" "${DIR}/prompts/investigate.md"; then
   fail "old one-platform route"
 fi
-echo "${prompt}" | grep -q "one cross-check search" || fail "cross-check not in prompt"
+echo "${prompt}" | grep -q "only project to search" || fail "cross-check not in prompt"
 echo "${prompt}" | grep -q "\*\*Verdict:\*\*" || fail "mr review not in prompt"
 
 tmp="$(mktemp -d)"
