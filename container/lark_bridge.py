@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lark @mention bridge. Runs on the host. Forwards one message to OpenCode, then replies in the thread."""
+"""Lark @mention bridge. Runs on the host. Forwards one message to Cursor Agent, then replies in the thread."""
 
 import json
 import os
@@ -25,8 +25,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 import mr_flow
 
-OPENCODE_URL = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4096")
-_OPENCODE_CONFIG = Path(__file__).with_name("out") / "opencode.json"
+CURSOR_AGENT_URL = os.environ.get("CURSOR_AGENT_URL", "http://127.0.0.1:4096")
 _LINKED_RECORD_GUIDANCE = "Investigate the request below using the linked Lark record as context."
 _TEXT_ONLY_EVIDENCE = (
     "The active model cannot read images in this Lark conversation. "
@@ -34,8 +33,6 @@ _TEXT_ONLY_EVIDENCE = (
     "or other images. If more evidence is essential, ask for one useful text equivalent, "
     "such as the exact error text, what the user sees, or the reproduction steps."
 )
-POLL_SECONDS = 3
-POLL_LIMIT = 300
 _PHONE = re.compile(r"\+62[\d\s-]{8,16}|\b08\d{8,13}\b")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w.-]+\.\w+\b")
 _TOKEN = re.compile(r"\b(?:glpat|sk)-[A-Za-z0-9_-]+\b")
@@ -164,16 +161,8 @@ def sniff_mime(raw: bytes) -> str:
 
 
 def supports_image_input() -> bool:
-    config_path = _OPENCODE_CONFIG
-    if not config_path.is_file():
-        config_path = Path(__file__).with_name("opencode.json.sample")
-    try:
-        config = json.loads(config_path.read_text())
-        provider, model = config["model"].split("/", 1)
-        input_modes = config["providers"][provider]["models"][model]["capabilities"]["input"]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return False
-    return isinstance(input_modes, list) and "image" in input_modes
+    flag = os.environ.get("CURSOR_IMAGE_INPUT", "1").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
 
 
 def image_part(raw: bytes):
@@ -830,31 +819,42 @@ def load_env(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
-def opencode_token() -> str:
-    password = os.environ.get("OPENCODE_SERVER_PASSWORD") or os.environ.get("OPENCODE_PASSWORD") or ""
-    if not password:
-        raise SystemExit("OPENCODE_SERVER_PASSWORD is empty")
-    return base64.b64encode(f"opencode:{password}".encode()).decode()
+def _prompt_images(body: dict) -> list:
+    images = []
+    for item in body.get("files") or []:
+        uri = item.get("uri") or ""
+        if not uri.startswith("data:") or ";base64," not in uri:
+            continue
+        header, data = uri.split(";base64,", 1)
+        images.append({"mime": header[5:] or "image/jpeg", "data": data})
+    return images
 
 
-def opencode(method: str, path: str, payload=None, timeout=60):
-    data = None if payload is None else json.dumps(payload).encode()
-    req = urllib.request.Request(
-        OPENCODE_URL + path,
-        data=data,
-        method=method,
-        headers={
-            "Authorization": "Basic " + opencode_token(),
-            "Content-Type": "application/json",
-        },
+def ask(session_id: str, body: dict, timeout=900) -> dict:
+    payload = json.dumps({
+        "session_id": session_id or "",
+        "text": body.get("text") or "",
+        "images": _prompt_images(body),
+    }).encode()
+    request = urllib.request.Request(
+        CURSOR_AGENT_URL + "/v1/prompt",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=timeout) as response:
             raw = response.read()
-            return json.loads(raw) if raw else {}
+            parsed = json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", "replace")[:300]
-        raise RuntimeError(f"opencode {method} {path} -> {error.code} {body}") from error
+        detail = error.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"cursor-agent POST /v1/prompt -> {error.code} {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"cursor-agent is not running at {CURSOR_AGENT_URL}: {error.reason}") from error
+    if not isinstance(parsed, dict) or not parsed.get("session_id"):
+        raise RuntimeError("cursor-agent did not return a session id")
+    return parsed
 
 
 class Sessions:
@@ -1066,68 +1066,41 @@ def _retry_context(history: list, current: str, file_evidence: list[str]) -> tup
 sessions = Sessions(str(Path(__file__).with_name(".sessions.json")))
 
 
-def _create_session() -> str:
-    created = opencode("POST", "/api/session", {})
-    session_id = (created.get("data") or created).get("id")
-    if not session_id:
-        raise RuntimeError("opencode did not return a session id")
-    return session_id
+def _turn_error(turn: dict, user_id: str) -> dict:
+    error = turn.get("error")
+    if isinstance(error, dict):
+        return error
+    messages = turn.get("messages") or []
+    return next((item["error"] for item in reversed(_messages_after(messages, user_id))
+                 if isinstance(item.get("error"), dict)), {})
 
 
-def _message_page(listed) -> list:
-    if isinstance(listed, list):
-        return listed
-    if not isinstance(listed, dict):
-        return []
-    data = listed.get("data")
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        nested = data.get("items") or data.get("messages") or []
-        return nested if isinstance(nested, list) else []
-    return []
-
-
-def _session_reply(session_id: str):
-    info = opencode("GET", f"/api/session/{session_id}")
-    session = info.get("data") if isinstance(info, dict) else None
-    if not isinstance(session, dict):
-        session = info if isinstance(info, dict) else {}
-    listed = opencode("GET", f"/api/session/{session_id}/message")
-    messages = _message_page(listed)
-    return session.get("outcome"), assistant_text(messages), messages
-
-
-def _admitted_user_id(admitted) -> str:
-    data = admitted.get("data") or admitted if isinstance(admitted, dict) else {}
-    return data.get("id") or "" if isinstance(data, dict) else ""
+def _remember(keys: list[str], previous: str, session_id: str) -> None:
+    if previous and previous != session_id:
+        sessions.replace(previous, session_id)
+    sessions.open(keys, lambda: session_id)
 
 
 def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
     keys = [session_key] if isinstance(session_key, str) else list(session_key or [])
     keys = [item for item in keys if item]
-    previous = ""
-    history = []
     existing = next((sessions.lookup(item) for item in keys if sessions.lookup(item)), "")
-    if existing:
-        try:
-            _, previous, history = _session_reply(existing)
-        except Exception as error:
-            if keys and session_missing(error):
-                sessions.drop(keys[0])
-            previous = ""
-    session_id = sessions.open(keys, _create_session)
     supports_images = supports_image_input()
     body = prompt_body(text, images or [], supports_images=supports_images)
-    try:
-        admitted = opencode("POST", f"/api/session/{session_id}/prompt", body, timeout=30)
-    except Exception as error:
-        if not (keys and session_missing(error)):
+
+    def submit(session_id: str, payload: dict) -> dict:
+        try:
+            return ask(session_id, payload, timeout=900)
+        except Exception as error:
+            if session_id and keys and session_missing(error):
+                sessions.drop(keys[0])
+                return ask("", payload, timeout=900)
             raise
-        sessions.drop(keys[0])
-        session_id = sessions.open(keys, _create_session)
-        admitted = opencode("POST", f"/api/session/{session_id}/prompt", body, timeout=30)
-    user_id = _admitted_user_id(admitted)
+
+    turn = submit(existing, body)
+    session_id = turn["session_id"]
+    _remember(keys, existing, session_id)
+    user_id = turn.get("user_id") or ""
     turn_user_id = user_id
     last = ""
     phase = "thinking"
@@ -1147,61 +1120,49 @@ def run_agent(text: str, images=None, session_key="", on_status=None) -> str:
             last = line
             on_status(line)
 
-    for _ in range(POLL_LIMIT):
-        time.sleep(POLL_SECONDS)
-        try:
-            outcome, reply, messages = _session_reply(session_id)
-        except Exception:
-            continue
+    for _ in range(6):
+        outcome = turn.get("outcome") or ""
+        reply = turn.get("reply") or ""
+        messages = turn.get("messages") or []
         if outcome == "failed":
-            error = next((item["error"] for item in reversed(_messages_after(messages, user_id))
-                          if isinstance(item.get("error"), dict)), None)
-            if not error and user_id:
-                continue
-            if not retried and error and error.get("type") == "provider.invalid-request" and error.get("status") == 422:
+            error = _turn_error(turn, user_id)
+            overflow = error.get("type") == "provider.invalid-request" and error.get("status") == 422
+            if not retried and overflow:
                 file_evidence = _retry_file_evidence(_messages_after(messages, turn_user_id))
-                retry_text, reused_findings = _retry_context(history, text, file_evidence)
+                retry_text, reused_findings = _retry_context(messages, text, file_evidence)
                 if retry_text:
-                    new_session = _create_session()
                     retry_body = prompt_body(retry_text, images or [], supports_images=supports_images)
-                    admitted = opencode("POST", f"/api/session/{new_session}/prompt", retry_body, timeout=30)
-                    sessions.replace(session_id, new_session)
+                    turn = submit("", retry_body)
+                    new_session = turn["session_id"]
+                    _remember(keys, session_id, new_session)
                     session_id = new_session
-                    user_id = _admitted_user_id(admitted)
-                    previous = ""
+                    user_id = turn.get("user_id") or ""
                     checked = shaped = False
                     retried = True
                     continue
             return "The model could not process this request. The investigation could not be completed."
-        fresh = reply_after(messages, user_id) if user_id else ""
-        shown = fresh or reply
         beat = tool_beat(messages)
         if beat:
             note("tool", beat)
-        elif shown and shown != previous and not outcome:
+        elif reply:
             note("write")
-        ready = fresh if fresh and reply_ready("", fresh, outcome) else ""
-        if not ready and reply_ready(previous, reply, outcome):
-            ready = reply
-        if ready:
-            nudge = ""
-            if not shaped and needs_summary_shape(ready):
-                shaped = True
-                nudge = _SUMMARY_SHAPE
-            elif not checked and not reused_findings and needs_code_check(ready, messages):
-                checked = True
-                note("tool", "mobox-glab search")
-                nudge = _CODE_CHECK
-            if nudge:
-                follow_body = {"text": nudge}
-                follow = opencode("POST", f"/api/session/{session_id}/prompt", follow_body, timeout=30)
-                previous = ready
-                user_id = _admitted_user_id(follow) or user_id
-                continue
-            return ready[:12000]
-        if outcome and not reply and not previous:
-            return f"OpenCode finished with outcome {outcome} and no text."
-    return "OpenCode did not finish within 15 minutes."
+        if not reply:
+            return f"Cursor agent finished with outcome {outcome or 'finished'} and no text."
+        nudge = ""
+        if not shaped and needs_summary_shape(reply):
+            shaped = True
+            nudge = _SUMMARY_SHAPE
+        elif not checked and not reused_findings and needs_code_check(reply, messages):
+            checked = True
+            note("tool", "mobox-glab search")
+            nudge = _CODE_CHECK
+        if nudge:
+            turn = submit(session_id, {"text": nudge})
+            session_id = turn.get("session_id") or session_id
+            user_id = turn.get("user_id") or user_id
+            continue
+        return reply[:12000]
+    return "Cursor agent did not finish within 15 minutes."
 
 
 def reply(client: lark.Client, message_id: str, text: str, *, in_thread: bool = False) -> str:

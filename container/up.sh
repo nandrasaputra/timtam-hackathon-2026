@@ -5,20 +5,16 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 
 mkdir -p "${DIR}/out" "${DIR}/workspace"
 "${DIR}/bin/assemble-prompt" > "${DIR}/workspace/AGENTS.md"
-if [[ ! -f "${DIR}/out/opencode.json" || "${DIR}/opencode.json.sample" -nt "${DIR}/out/opencode.json" ]]; then
-  cp "${DIR}/opencode.json.sample" "${DIR}/out/opencode.json"
-fi
 
 test -f "${DIR}/.env"
 
-exec podman run --rm --entrypoint bash \
+exec podman run --rm \
   -v "${DIR}/bin/mobox-glab:/usr/local/bin/mobox-glab:ro" \
+  -v "${DIR}/cursor_agent.py:/opt/mobox/cursor_agent.py:ro" \
+  -v "${DIR}/cursor_agent_server.py:/opt/mobox/cursor_agent_server.py:ro" \
   -v "${DIR}/workspace:/workspace:ro" \
-  -v "${DIR}/plugins:/workspace/.opencode/plugins:ro" \
-  -v "${DIR}/out/opencode.json:/config/opencode.json:ro" \
   --env-file "${DIR}/.env" \
-  -e OPENCODE_CONFIG=/config/opencode.json \
+  -e CURSOR_AGENT_CWD=/workspace \
   -p 127.0.0.1:4096:4096 \
   -w /workspace \
-  mobox-poc \
-  -c 'exec opencode serve --hostname 0.0.0.0 --port 4096'
+  mobox-poc

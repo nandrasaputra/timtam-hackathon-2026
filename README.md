@@ -1,6 +1,6 @@
 # MoBox
 
-MoBox is a mobile support buddy. A Lark @mention, or a paste in the OpenCode page, asks about the code, reports a bug, asks for a small change, or asks for a review of an MR this team must approve. The agent reads `mobile/GoHost` (Android) and `mobile/consumer-ios` (iOS). A confirmed draft MR is the only clone.
+MoBox is a mobile support buddy. A Lark @mention asks about the code, reports a bug, asks for a small change, or asks for a review of an MR this team must approve. The agent reads `mobile/GoHost` (Android) and `mobile/consumer-ios` (iOS). A confirmed draft MR is the only clone.
 
 Run this from the repo root. Use `container`. `container_test` is a local copy and is gitignored. Keep each command on one line. A wrapped paste is executed as several commands.
 
@@ -19,10 +19,9 @@ If `podman machine start` prints success and the machine is then `stopped`, dele
 
 - `GITLAB_TOKEN`: `read_api` and `read_repository` for search. A draft MR also needs push and MR create on the same token.
 - `MOBOX_GIT_EMAIL` and `MOBOX_GIT_NAME`: the draft MR commit author. GoHost's push rule rejects an email outside the company domains, so use the token owner's email.
-- `OPENCODE_SERVER_PASSWORD`: password for the local page. The username is always `opencode`.
-- `COMMANDCODE_API_KEY`: key for the default model, `commandcode/gpt-6-luna`, used by OpenCode and the Lark bridge. [Command Code Provider API](https://commandcode.ai/docs/provider)
-- `LITELLM_API_KEY`: optional key for the LiteLLM Agora models. To change the default, set `"model"` in `container/out/opencode.json` and restart. `up.sh` refreshes that file when `container/opencode.json.sample` is newer.
-- The Lark bridge reads the default model's input capabilities from `container/out/opencode.json`. GPT-6 Luna is configured for text and images. The bundled Agora models are configured for text input.
+- `CURSOR_API_KEY`: key for Cursor Agent. Create one under Cursor Dashboard → Integrations.
+- `CURSOR_MODEL`: model id passed to the agent. Default is `grok-4.7`.
+- `CURSOR_IMAGE_INPUT`: `1` sends Lark images to the agent. Set `0` for a text-only model. The bridge then asks for a text equivalent instead of a screenshot.
 - `LARK_APP_ID` and `LARK_APP_SECRET`: the MoBox Lark app. Leave them empty if you only use the web page.
 - `LARK_BOT_OPEN_ID`: the bot open_id. Group messages count only when this id is mentioned.
 - `LARK_TAG_OPEN_IDS`: comma-separated on-call tag open_ids. A mention of one of these in a watched channel starts the same triage.
@@ -47,7 +46,7 @@ Terminal A, the agent:
 container/up.sh
 ```
 
-`up.sh` mounts the GitLab wrapper and `prompts/investigate.md`, and serves OpenCode on `127.0.0.1:4096`. Leave it running. Ctrl-C stops the container. `--rm` deletes that container, including its chat sessions.
+`up.sh` mounts the GitLab wrapper and the assembled `AGENTS.md`, and serves Cursor Agent on `127.0.0.1:4096`. Leave it running. Ctrl-C stops the container. `--rm` deletes that container, including its chat sessions.
 
 Terminal B, the Lark bridge:
 
@@ -57,7 +56,7 @@ container/.venv/bin/python container/lark_bridge.py container/.env
 
 Leave it running. One status message moves from reading the thread, to searching, to writing the triage, then the card arrives.
 
-Open `http://127.0.0.1:4096` and sign in as `opencode` with `OPENCODE_SERVER_PASSWORD`. The page is bound to localhost only.
+Open `http://127.0.0.1:4096` for the Cursor Agent page. The port is bound to localhost. The Lark bridge uses the same port.
 
 ## What to send
 
@@ -75,10 +74,10 @@ In Lark, `@` **MoBox** inside the group or thread.
 
 ## Logs
 
-OpenCode does not print each request. An idle page log is only:
+An idle agent log is only:
 
 ```text
-server listening on http://0.0.0.0:4096
+cursor-agent listening on http://0.0.0.0:4096
 ```
 
 Follow the container anyway:

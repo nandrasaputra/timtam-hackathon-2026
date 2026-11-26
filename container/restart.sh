@@ -18,10 +18,8 @@ test -f "${DIR}/.env"
 
 podman build -t mobox-poc -f "${DIR}/Containerfile" "${DIR}"
 
-mkdir -p "${DIR}/out"
-if [[ ! -f "${DIR}/out/opencode.json" || "${DIR}/opencode.json.sample" -nt "${DIR}/out/opencode.json" ]]; then
-  cp "${DIR}/opencode.json.sample" "${DIR}/out/opencode.json"
-fi
+mkdir -p "${DIR}/out" "${DIR}/workspace"
+"${DIR}/bin/assemble-prompt" > "${DIR}/workspace/AGENTS.md"
 
 ids="$(podman ps --format '{{.ID}} {{.Image}} {{.Ports}}' | awk '/mobox-poc/ || /:4096->/ { print $1 }')"
 if [[ -n "${ids}" ]]; then
