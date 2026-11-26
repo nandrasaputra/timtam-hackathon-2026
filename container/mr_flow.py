@@ -65,7 +65,9 @@ def _is_change(text: str) -> bool:
 
 def is_triage(text: str) -> bool:
     change = _is_change(text)
-    if not change and ("**Issue:**" not in text or "Raise MR fix?" not in text):
+    if not change and "**Issue:**" not in text:
+        return False
+    if not change and "Raise MR fix?" not in text and not _field(text, "Confidence"):
         return False
     issue = _field(text, "Change" if change else "Issue")
     platform = _field(text, "Platform").lower()

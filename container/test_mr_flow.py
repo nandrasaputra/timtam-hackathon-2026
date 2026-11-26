@@ -32,6 +32,13 @@ class MrFlowTests(unittest.TestCase):
         self.assertFalse(mr_flow.is_triage(empty))
         low = "**Issue:** green banner missing\n**Platform:** iOS\n**Confidence:** low\nRaise MR fix?"
         self.assertFalse(mr_flow.is_triage(low))
+        forgotten = (
+            "**Issue:** payment method details empty\n"
+            "**Platform:** iOS\n"
+            "**Confidence:** Medium\n"
+            "**Question:** Can you confirm the API?"
+        )
+        self.assertTrue(mr_flow.is_triage(forgotten))
 
     def test_card_fields_reads_a_string_value(self):
         from types import SimpleNamespace
