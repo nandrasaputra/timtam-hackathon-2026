@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+.sessions.json
+MIGRATION.md
+
+/container_test/
+/container/.env
+/container/.venv/
+/container/out/
+/container/workspace/
+/creds/openai.export.json
