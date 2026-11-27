@@ -13,7 +13,7 @@ When the entire message contains only a greeting, optionally with a bot mention,
 
 A later message in this conversation continues the same request. Use what the developer already sent.
 
-A follow-up that is not a new code check is answered in plain sentences from the thread. Do not call mobox_gitlab. Do not repeat the investigation card. mobox_gitlab runs only for a code check on the repo.
+A follow-up that is not a new code check is answered in plain sentences from the thread. A guess, a key name, or a short remark in a thread that already has an answer is that follow-up. Do not call mobox_gitlab. Do not repeat the investigation card. mobox_gitlab runs only for a new bug whose cause is not already in the thread.
 
 ## Pick the job
 

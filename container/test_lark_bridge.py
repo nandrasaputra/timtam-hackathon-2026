@@ -265,6 +265,32 @@ class BridgeTests(unittest.TestCase):
         bridge._send(client, "om_1", "text", "{}", in_thread=False)
         self.assertFalse(seen["flag"])
 
+    def test_personal_chat_reply_stays_in_the_thread(self):
+        from unittest import mock
+
+        sent = []
+
+        class Now:
+            def __init__(self, target, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        def send(_c, _mid, _msg_type, _content, in_thread=False):
+            sent.append(in_thread)
+            return "om_status", "omt_dm"
+
+        data = event("you there?", chat_type="p2p", chat_id="oc_dm", mentions=())
+        with mock.patch.object(bridge.threading, "Thread", Now), \
+                mock.patch.object(bridge, "_send", send), \
+                mock.patch.object(bridge, "run_agent", return_value="here"), \
+                mock.patch.object(bridge, "update_card", return_value=True), \
+                mock.patch.object(bridge, "build_context", return_value=("you there?", [])):
+            bridge.handle(SimpleNamespace(), data)
+        self.assertTrue(sent)
+        self.assertTrue(all(sent))
+
     def test_status_names_the_real_step(self):
         self.assertEqual(bridge.status_line("think"), "Thinking....")
         self.assertEqual(bridge.status_line("thread"), "[1/3] Reading the thread")

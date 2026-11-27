@@ -1707,7 +1707,7 @@ def handle(client: lark.Client, data) -> None:
         return
     message_id = message.message_id
     dedupe_id = event_key(data)
-    in_thread = getattr(message, "chat_type", "") != "p2p"
+    in_thread = True
 
     def work():
         posted = {"id": "", "line": "", "thread_id": ""}

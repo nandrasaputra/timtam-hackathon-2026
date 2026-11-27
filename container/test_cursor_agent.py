@@ -53,6 +53,12 @@ class BuiltinToolsTest(unittest.TestCase):
         self.assertIn("Do not call mobox_gitlab", text)
         self.assertIn("Read it", text)
 
+    def test_system_prompt_keeps_a_follow_up_out_of_the_card(self):
+        text = cursor_agent.system_prompt()
+        self.assertIn("A follow-up, a guess, or a short remark stays in plain sentences", text)
+        self.assertIn("Do not repeat the investigation card", text)
+        self.assertNotIn("where-is-this", text)
+
     def test_lookup_stops_after_the_budget(self):
         self.assertEqual(cursor_agent.guarded_lookup(6, lambda: "ran"), cursor_agent.STOP_LOOKUP)
 
